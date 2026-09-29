@@ -38,6 +38,7 @@ type AppState = {
   setNodeData: (data: ZkNodeData | null) => void
   setChildren: (path: string, children: string[]) => void
   setExpanded: (path: string, open: boolean) => void
+  resetWorkspaceTree: () => void
   setEditorDraft: (draft: string) => void
   setEditorDirty: (dirty: boolean) => void
   setEditorLang: (lang: AppState['editorLang']) => void
@@ -81,6 +82,7 @@ export const useAppStore = create<AppState>((set) => ({
   setNodeData: (nodeData) => set({ nodeData }),
   setChildren: (path, children) => set((s) => ({ tree: { ...s.tree, [path]: children } })),
   setExpanded: (path, open) => set((s) => ({ expanded: { ...s.expanded, [path]: open } })),
+  resetWorkspaceTree: () => set({ tree: {}, expanded: { '/': true }, selectedPath: '/', searchResults: [] }),
   setEditorDraft: (editorDraft) => set({ editorDraft }),
   setEditorDirty: (editorDirty) => set({ editorDirty }),
   setEditorLang: (editorLang) => set({ editorLang }),

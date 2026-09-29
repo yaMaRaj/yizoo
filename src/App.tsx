@@ -10,10 +10,11 @@ import { NodeTree } from './features/nodes/NodeTree'
 import { DataEditor } from './features/editor/DataEditor'
 import { BottomDrawer } from './features/workspace/BottomDrawer'
 import { ConfirmDialog } from './components/ConfirmDialog'
+import { askConfirm } from './components/confirm-store'
 import type { ConnectionProfile } from '@shared/types'
 
 export function App() {
-  const { i18n } = useTranslation()
+  const { t, i18n } = useTranslation()
   const {
     setProfiles,
     setStatus,
@@ -27,7 +28,6 @@ export function App() {
     setError,
     activeId,
     setActiveId,
-    setSelectedPath,
     setNodeData,
     setEditorDraft,
     setEditorDirty,
@@ -35,6 +35,7 @@ export function App() {
     setChildren,
     setLoading,
     setAlerts,
+    resetWorkspaceTree,
   } = useAppStore()
 
   const [formOpen, setFormOpen] = useState(false)
@@ -71,14 +72,32 @@ export function App() {
     input.click()
   }
 
-  async function handleConnect(profile: ConnectionProfile) {
+  async function handleConnect(
+    profile: ConnectionProfile,
+    options?: { switchFromWorkspace?: boolean },
+  ) {
+    const state = useAppStore.getState()
+    if (options?.switchFromWorkspace && profile.id === state.activeId) return
+
+    if (options?.switchFromWorkspace && state.editorDirty) {
+      const ok = await askConfirm({
+        title: t('brand'),
+        message: t('confirmUnsaved'),
+        confirmLabel: t('ok'),
+        cancelLabel: t('cancel'),
+        danger: true,
+      })
+      if (!ok) return
+    }
+
     setLoading(true)
     setError(null)
     try {
+      // Already-connected sessions return immediately; disconnected ones establish now
+      await window.yizoo.zk.connect(profile.id)
       setActiveId(profile.id)
       setShowHome(false)
-      await window.yizoo.zk.connect(profile.id)
-      setSelectedPath('/')
+      resetWorkspaceTree()
       setEditorDirty(false)
       setEditorLang('plaintext')
       const children = await window.yizoo.zk.listChildren(profile.id, '/')
@@ -95,7 +114,8 @@ export function App() {
       setAlerts(await window.yizoo.monitor.getAlerts(profile.id))
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
-      setShowHome(true)
+      // Switching from workspace: keep previous connection; from home: stay on home
+      if (!options?.switchFromWorkspace) setShowHome(true)
     } finally {
       setLoading(false)
     }
@@ -199,7 +219,10 @@ export function App() {
       <div className="workspace">
         {inWorkspace ? (
           <>
-            <TopBar onBackHome={() => setShowHome(true)} />
+            <TopBar
+              onBackHome={() => setShowHome(true)}
+              onSwitchConnection={(p) => void handleConnect(p, { switchFromWorkspace: true })}
+            />
             <div className="main-pane">
               <aside className="tree-pane">
                 <NodeTree />

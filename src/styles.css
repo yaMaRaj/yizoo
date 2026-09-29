@@ -299,14 +299,116 @@ button { cursor: pointer; }
   color: var(--text-muted);
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: visible;
+  display: flex;
+  align-items: center;
   white-space: nowrap;
 }
 
 .breadcrumb-server { color: var(--text); font-weight: 600; }
-.breadcrumb-sep { margin: 0 6px; opacity: 0.5; }
-.breadcrumb-path { color: var(--text-muted); }
+.breadcrumb-sep { margin: 0 6px; opacity: 0.5; flex-shrink: 0; }
+.breadcrumb-path {
+  color: var(--text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.connection-switcher {
+  position: relative;
+  display: inline-flex;
+  max-width: 220px;
+}
+
+.connection-switcher-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  border: none;
+  background: transparent;
+  padding: 2px 6px;
+  margin: -2px -6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.connection-switcher-btn:hover,
+.connection-switcher-btn[aria-expanded='true'] {
+  background: color-mix(in srgb, var(--brand) 10%, transparent);
+}
+
+.connection-switcher-btn > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.connection-switcher-caret {
+  font-size: 0.7rem;
+  opacity: 0.55;
+  flex-shrink: 0;
+}
+
+.connection-switcher-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 220px;
+  max-width: 320px;
+  max-height: 280px;
+  overflow: auto;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px color-mix(in srgb, #000 16%, transparent);
+  z-index: 40;
+}
+
+.connection-switcher-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text);
+  font: inherit;
+}
+
+.connection-switcher-item:hover,
+.connection-switcher-item.active {
+  background: color-mix(in srgb, var(--brand) 10%, transparent);
+}
+
+.connection-switcher-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.connection-switcher-item-name {
+  font-weight: 600;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.connection-switcher-item-meta {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-family: var(--mono);
+}
 
 .search-box {
   display: flex;
