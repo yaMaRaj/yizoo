@@ -90,14 +90,22 @@ export function TerminalPane() {
         historyRef.current.push(line)
         histIdxRef.current = -1
         busyRef.current = true
-        void window.yizoo.zk.executeCli(id, line).then((res) => {
-          const color = res.ok ? '' : '\x1b[31m'
-          for (const outLine of (res.output || '').split('\n')) {
-            term.writeln(`${color}${outLine}\x1b[0m`)
-          }
-          busyRef.current = false
-          writePrompt()
-        })
+        void window.yizoo.zk
+          .executeCli(id, line)
+          .then((res) => {
+            const color = res.ok ? '' : '\x1b[31m'
+            for (const outLine of (res.output || '').split('\n')) {
+              term.writeln(`${color}${outLine}\x1b[0m`)
+            }
+          })
+          .catch((err) => {
+            const msg = err instanceof Error ? err.message : String(err)
+            term.writeln(`\x1b[31m${msg}\x1b[0m`)
+          })
+          .finally(() => {
+            busyRef.current = false
+            writePrompt()
+          })
         return
       }
       if (data === '\x7f' || data === '\b') {

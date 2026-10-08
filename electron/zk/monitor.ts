@@ -270,6 +270,16 @@ export function stopMonitor(id: string): void {
   appendLog('info', 'monitor', `Stopped monitor for ${id}`)
 }
 
+/** Re-apply polling interval after settings change (active monitors only). */
+export function restartActiveMonitors(): void {
+  for (const id of monitors.keys()) {
+    if (monitors.get(id)?.timer) {
+      stopMonitor(id)
+      startMonitor(id)
+    }
+  }
+}
+
 export function getLatest(id: string): MonitorSample[] {
   return ensureState(id).latest
 }

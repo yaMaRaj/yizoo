@@ -70,7 +70,13 @@ export function registerIpc(): void {
   ipcMain.handle(IPC.monitor.getAlerts, (_e, id: string) => monitor.getAlerts(id))
 
   ipcMain.handle(IPC.settings.get, () => config.getSettings())
-  ipcMain.handle(IPC.settings.set, (_e, patch: Partial<AppSettings>) => config.setSettings(patch))
+  ipcMain.handle(IPC.settings.set, (_e, patch: Partial<AppSettings>) => {
+    const next = config.setSettings(patch)
+    if (patch.monitorIntervalMs != null) {
+      monitor.restartActiveMonitors()
+    }
+    return next
+  })
 
   ipcMain.handle(IPC.logs.list, () => logger.listLogs())
   ipcMain.handle(IPC.logs.clear, () => logger.clearLogs())

@@ -167,6 +167,7 @@ function getAclAsync(client: Client, path: string): Promise<{ acls: ACL[]; stat:
   return new Promise((resolve, reject) => {
     client.getACL(path, (err: Error | null, acls: ACL[], stat: Stat) => {
       if (err) reject(err)
+      else if (!stat) reject(new Error(`No stat returned for ${path}`))
       else resolve({ acls: acls ?? [], stat })
     })
   })
@@ -182,9 +183,7 @@ export function getSessionEndpoint(id: string): { host: string; port: number } |
   return { host: s.connectHost, port: s.connectPort }
 }
 
-export function getProfileHosts(id: string): Array<{ host: string; port: number }> {
-  const profile = getConnection(id) ?? sessions.get(id)?.profile
-  if (!profile) return []
+export function parseProfileHosts(profile: ConnectionProfile): Array<{ host: string; port: number }> {
   const hosts = profile.host
     .split(',')
     .map((h: string) => h.trim())
@@ -193,6 +192,12 @@ export function getProfileHosts(id: string): Array<{ host: string; port: number 
     const [host, p] = h.split(':')
     return { host, port: p ? Number(p) : profile.port }
   })
+}
+
+export function getProfileHosts(id: string): Array<{ host: string; port: number }> {
+  const profile = getConnection(id) ?? sessions.get(id)?.profile
+  if (!profile) return []
+  return parseProfileHosts(profile)
 }
 
 export async function connect(id: string): Promise<void> {
@@ -211,17 +216,24 @@ export async function connect(id: string): Promise<void> {
   appendLog('info', 'zk', `Connecting ${profile.name} (${profile.host}:${profile.port})`)
 
   let tunnel: TunnelHandle | undefined
-  let connectHost = profile.host.split(',')[0].split(':')[0]
-  let connectPort = profile.port
+  const hostEntries = parseProfileHosts(profile)
+  if (hostEntries.length === 0) {
+    throw new Error('Invalid host configuration')
+  }
+  const primary = hostEntries[0]
+  let connectHost = primary.host
+  let connectPort = primary.port
+  let connectionString: string
 
   try {
     if (profile.ssh?.enabled) {
       tunnel = await openSshTunnel(profile.ssh, connectHost, connectPort)
       connectHost = '127.0.0.1'
       connectPort = tunnel.localPort
+      connectionString = `${connectHost}:${connectPort}`
+    } else {
+      connectionString = hostEntries.map((h) => `${h.host}:${h.port}`).join(',')
     }
-
-    const connectionString = `${connectHost}:${connectPort}`
     const client = zookeeper.createClient(connectionString, {
       sessionTimeout: profile.sessionTimeoutMs || 30000,
       retries: 3,
@@ -245,6 +257,11 @@ export async function connect(id: string): Promise<void> {
 
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
+        try {
+          client.close()
+        } catch {
+          /* ignore */
+        }
         reject(new Error('Connection timeout'))
       }, profile.connectionTimeoutMs || 15000)
 
@@ -369,6 +386,7 @@ export async function setData(
   const stat = await new Promise<Stat>((resolve, reject) => {
     session.client.setData(path, Buffer.from(data, 'utf8'), version, (err, st) => {
       if (err) reject(err)
+      else if (!st) reject(new Error(`No stat returned for ${path}`))
       else resolve(st)
     })
   })
@@ -463,6 +481,7 @@ export async function setAcl(
   const stat = await new Promise<Stat>((resolve, reject) => {
     session.client.setACL(path, zkToAcl(acls), version, (err, st) => {
       if (err) reject(err)
+      else if (!st) reject(new Error(`No stat returned for ${path}`))
       else resolve(st)
     })
   })

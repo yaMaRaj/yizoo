@@ -338,15 +338,19 @@ export function DataEditor() {
       danger: true,
     })
     if (!ok) return
-    await window.yizoo.zk.remove(activeId, selectedPath, recursive)
-    const parent =
-      selectedPath === '/' ? '/' : selectedPath.slice(0, selectedPath.lastIndexOf('/')) || '/'
-    const kids = await window.yizoo.zk.listChildren(activeId, parent)
-    setChildren(
-      parent,
-      kids.map((k) => k.name),
-    )
-    window.dispatchEvent(new CustomEvent('yizoo:select-path', { detail: parent }))
+    try {
+      await window.yizoo.zk.remove(activeId, selectedPath, recursive)
+      const parent =
+        selectedPath === '/' ? '/' : selectedPath.slice(0, selectedPath.lastIndexOf('/')) || '/'
+      const kids = await window.yizoo.zk.listChildren(activeId, parent)
+      setChildren(
+        parent,
+        kids.map((k) => k.name),
+      )
+      window.dispatchEvent(new CustomEvent('yizoo:select-path', { detail: parent }))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   async function create() {
@@ -356,24 +360,38 @@ export function DataEditor() {
       : selectedPath === '/'
         ? `/${newPath}`
         : `${selectedPath}/${newPath}`
-    await window.yizoo.zk.create(activeId, full, newData, ephemeral, sequential)
-    setCreateOpen(false)
-    setNewPath('')
-    setNewData('')
-    const parent = full.slice(0, full.lastIndexOf('/')) || '/'
-    const kids = await window.yizoo.zk.listChildren(activeId, parent)
-    setChildren(
-      parent,
-      kids.map((k) => k.name),
-    )
-    window.dispatchEvent(new CustomEvent('yizoo:select-path', { detail: full }))
+    try {
+      await window.yizoo.zk.create(activeId, full, newData, ephemeral, sequential)
+      setCreateOpen(false)
+      setNewPath('')
+      setNewData('')
+      const parent = full.slice(0, full.lastIndexOf('/')) || '/'
+      const kids = await window.yizoo.zk.listChildren(activeId, parent)
+      setChildren(
+        parent,
+        kids.map((k) => k.name),
+      )
+      window.dispatchEvent(new CustomEvent('yizoo:select-path', { detail: full }))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   async function saveAcl() {
     if (!activeId || !nodeData) return
-    const acls = aclDraft.length ? aclDraft : nodeData.acls
-    const stat = await window.yizoo.zk.setAcl(activeId, selectedPath, acls, nodeData.stat.aversion)
-    setNodeData({ ...nodeData, acls, stat })
+    try {
+      const acls = aclDraft.length ? aclDraft : nodeData.acls
+      const stat = await window.yizoo.zk.setAcl(
+        activeId,
+        selectedPath,
+        acls,
+        nodeData.stat.aversion,
+      )
+      setNodeData({ ...nodeData, acls, stat })
+      setError(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   const dataLength = nodeData.stat?.dataLength ?? 0
