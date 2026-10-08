@@ -141,6 +141,7 @@ export async function executeCli(id: string, line: string): Promise<CliResult> {
           const parts = spec.split(':')
           if (parts.length < 3) throw new Error(`Invalid ACL: ${spec}`)
           const perms = Number(parts[parts.length - 1])
+          if (!Number.isInteger(perms)) throw new Error(`Invalid ACL perms: ${spec}`)
           const scheme = parts[0]
           const idPart = parts.slice(1, -1).join(':')
           return { scheme, id: idPart, perms }

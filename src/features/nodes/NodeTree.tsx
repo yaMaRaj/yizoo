@@ -13,9 +13,6 @@ function TreeItem({ path, name, depth }: { path: string; name: string; depth: nu
     setExpanded,
     setChildren,
     setSelectedPath,
-    setNodeData,
-    setEditorDraft,
-    setEditorDirty,
     setEditorLang,
     setError,
     editorDirty,
@@ -36,6 +33,7 @@ function TreeItem({ path, name, depth }: { path: string; name: string; depth: nu
 
   async function select() {
     if (!activeId) return
+    const id = activeId
     if (editorDirty) {
       const ok = await askConfirm({
         title: t('brand'),
@@ -44,20 +42,27 @@ function TreeItem({ path, name, depth }: { path: string; name: string; depth: nu
         cancelLabel: t('cancel'),
         danger: true,
       })
-      if (!ok) return
+      if (!ok || useAppStore.getState().activeId !== id) return
     }
     setSelectedPath(path)
     setEditorLang('plaintext')
     try {
-      const data = await window.yizoo.zk.getData(activeId, path)
+      const data = await window.yizoo.zk.getData(id, path)
+      const latest = useAppStore.getState()
+      if (latest.activeId !== id || latest.selectedPath !== path) return
       const text = typeof data?.data === 'string' ? data.data : ''
-      setNodeData(data)
-      setEditorDraft(text)
-      setEditorDirty(false)
-      setEditorLang('plaintext')
-      setError(null)
+      latest.setNodeData(data)
+      latest.setEditorDraft(text)
+      latest.setEditorDirty(false)
+      latest.setEditorLang('plaintext')
+      latest.setError(null)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      const latest = useAppStore.getState()
+      if (latest.activeId !== id || latest.selectedPath !== path) return
+      latest.setNodeData(null)
+      latest.setEditorDraft('')
+      latest.setEditorDirty(false)
+      latest.setError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -103,20 +108,16 @@ function TreeItem({ path, name, depth }: { path: string; name: string; depth: nu
 
 export function NodeTree() {
   const activeId = useAppStore((s) => s.activeId)
-  const setChildren = useAppStore((s) => s.setChildren)
   const setExpanded = useAppStore((s) => s.setExpanded)
   const setSelectedPath = useAppStore((s) => s.setSelectedPath)
-  const setNodeData = useAppStore((s) => s.setNodeData)
-  const setEditorDraft = useAppStore((s) => s.setEditorDraft)
-  const setEditorDirty = useAppStore((s) => s.setEditorDirty)
   const setEditorLang = useAppStore((s) => s.setEditorLang)
-  const setError = useAppStore((s) => s.setError)
 
   useEffect(() => {
     const handler = (e: Event) => {
       const path = (e as CustomEvent<string>).detail
       void (async () => {
-        if (!activeId) return
+        const id = useAppStore.getState().activeId
+        if (!id) return
         setSelectedPath(path)
         setEditorLang('plaintext')
         const parts = path.split('/').filter(Boolean)
@@ -128,37 +129,37 @@ export function NodeTree() {
         }
         setExpanded('/', true)
         try {
-          const data = await window.yizoo.zk.getData(activeId, path)
+          const data = await window.yizoo.zk.getData(id, path)
+          const latest = useAppStore.getState()
+          if (latest.activeId !== id || latest.selectedPath !== path) return
           const text = typeof data?.data === 'string' ? data.data : ''
-          setNodeData(data)
-          setEditorDraft(text)
-          setEditorDirty(false)
-          setEditorLang('plaintext')
+          latest.setNodeData(data)
+          latest.setEditorDraft(text)
+          latest.setEditorDirty(false)
+          latest.setEditorLang('plaintext')
           const parent = path === '/' ? '/' : path.slice(0, path.lastIndexOf('/')) || '/'
-          const kids = await window.yizoo.zk.listChildren(activeId, parent === '' ? '/' : parent)
-          setChildren(
-            parent === '' ? '/' : parent,
+          const parentPath = parent === '' ? '/' : parent
+          const kids = await window.yizoo.zk.listChildren(id, parentPath)
+          const afterKids = useAppStore.getState()
+          if (afterKids.activeId !== id) return
+          afterKids.setChildren(
+            parentPath,
             kids.map((k) => k.name),
           )
-          setError(null)
+          afterKids.setError(null)
         } catch (err) {
-          setError(err instanceof Error ? err.message : String(err))
+          const latest = useAppStore.getState()
+          if (latest.activeId !== id || latest.selectedPath !== path) return
+          latest.setNodeData(null)
+          latest.setEditorDraft('')
+          latest.setEditorDirty(false)
+          latest.setError(err instanceof Error ? err.message : String(err))
         }
       })()
     }
     window.addEventListener('yizoo:select-path', handler)
     return () => window.removeEventListener('yizoo:select-path', handler)
-  }, [
-    activeId,
-    setChildren,
-    setEditorDraft,
-    setEditorDirty,
-    setEditorLang,
-    setError,
-    setExpanded,
-    setNodeData,
-    setSelectedPath,
-  ])
+  }, [setEditorLang, setExpanded, setSelectedPath])
 
   if (!activeId) return null
   return <TreeItem path="/" name="/" depth={0} />

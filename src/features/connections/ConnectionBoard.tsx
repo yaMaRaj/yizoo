@@ -23,7 +23,9 @@ export function ConnectionBoard({ onEdit, onConnect }: Props) {
   const setActiveId = useAppStore((s) => s.setActiveId)
   const setNodeData = useAppStore((s) => s.setNodeData)
   const setEditorDraft = useAppStore((s) => s.setEditorDraft)
+  const setEditorDirty = useAppStore((s) => s.setEditorDirty)
   const setProfiles = useAppStore((s) => s.setProfiles)
+  const setError = useAppStore((s) => s.setError)
   const [menu, setMenu] = useState<MenuState>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -49,15 +51,12 @@ export function ConnectionBoard({ onEdit, onConnect }: Props) {
       setActiveId(null)
       setNodeData(null)
       setEditorDraft('')
+      setEditorDirty(false)
     }
     setMenu(null)
   }
 
   async function handleDelete(profile: ConnectionProfile) {
-    const status = statuses[profile.id] ?? 'disconnected'
-    if (status === 'connected' || status === 'reconnecting') {
-      await window.yizoo.zk.disconnect(profile.id)
-    }
     const ok = await askConfirm({
       title: t('brand'),
       message: t('confirmDeleteConnection', { name: profile.name }),
@@ -66,12 +65,19 @@ export function ConnectionBoard({ onEdit, onConnect }: Props) {
       danger: true,
     })
     if (!ok) return
-    await window.yizoo.connections.remove(profile.id)
-    setProfiles(await window.yizoo.connections.list())
+    try {
+      await window.yizoo.connections.remove(profile.id)
+      setProfiles(await window.yizoo.connections.list())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      setMenu(null)
+      return
+    }
     if (activeId === profile.id) {
       setActiveId(null)
       setNodeData(null)
       setEditorDraft('')
+      setEditorDirty(false)
     }
     setMenu(null)
   }

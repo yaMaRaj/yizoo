@@ -9,6 +9,8 @@ import type {
   ZkNodeData,
   ZkStat,
 } from '../../shared/types'
+import { formatEnsemble, parseEnsemble, type HostPort } from '../../shared/hosts'
+import { pathMatchesKeyword } from '../../shared/search'
 import { IPC } from '../../shared/ipc'
 import { getConnection } from '../store/config'
 import { openSshTunnel, type TunnelHandle } from '../ssh/tunnel'
@@ -23,15 +25,18 @@ const OPEN_ACL = zookeeper.ACL.OPEN_ACL_UNSAFE
 type Session = {
   id: string
   profile: ConnectionProfile
-  client: Client
+  client?: Client
   status: ConnectionStatus
   tunnel?: TunnelHandle
   connectHost: string
   connectPort: number
   watchedPaths: Set<string>
+  /** Rejects an in-flight connect when the user disconnects first. */
+  cancelConnect?: (err: Error) => void
 }
 
 const sessions = new Map<string, Session>()
+const pendingConnects = new Map<string, Promise<void>>()
 
 function emitStatus(id: string, status: ConnectionStatus, error?: string): void {
   const session = sessions.get(id)
@@ -39,6 +44,10 @@ function emitStatus(id: string, status: ConnectionStatus, error?: string): void 
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(IPC.events.connectionStatus, { id, status, error })
   }
+}
+
+function isLive(session: Session): boolean {
+  return sessions.get(session.id) === session
 }
 
 function longToNumber(value: unknown): number {
@@ -78,7 +87,7 @@ function longToHex(value: unknown): string {
   const n = longToNumber(value)
   if (!Number.isFinite(n)) return '0x0'
   const big = BigInt(Math.trunc(n))
-  return '0x' + (big < 0n ? big.toString(16) : big.toString(16))
+  return '0x' + big.toString(16)
 }
 
 function normalizeStat(stat: Stat): ZkStat {
@@ -126,13 +135,13 @@ function zkToAcl(acls: ZkAcl[]): ACL[] {
   }))
 }
 
-function ensureSession(id: string): Session {
+function ensureSession(id: string): Session & { client: Client } {
   const s = sessions.get(id)
-  if (!s) throw new Error('Not connected')
+  if (!s || !s.client) throw new Error('Not connected')
   if (s.status !== 'connected' && s.status !== 'reconnecting') {
     throw new Error(`Connection is ${s.status}`)
   }
-  return s
+  return s as Session & { client: Client }
 }
 
 function getChildrenAsync(client: Client, path: string): Promise<string[]> {
@@ -172,6 +181,20 @@ function getAclAsync(client: Client, path: string): Promise<{ acls: ACL[]; stat:
   })
 }
 
+function closeClient(client: Client | undefined): void {
+  if (!client) return
+  try {
+    client.removeAllListeners()
+  } catch {
+    /* ignore */
+  }
+  try {
+    client.close()
+  } catch {
+    /* ignore */
+  }
+}
+
 export function getStatus(id: string): ConnectionStatus {
   return sessions.get(id)?.status ?? 'disconnected'
 }
@@ -182,150 +205,227 @@ export function getSessionEndpoint(id: string): { host: string; port: number } |
   return { host: s.connectHost, port: s.connectPort }
 }
 
-export function getProfileHosts(id: string): Array<{ host: string; port: number }> {
+export function getProfileHosts(id: string): HostPort[] {
   const profile = getConnection(id) ?? sessions.get(id)?.profile
   if (!profile) return []
-  const hosts = profile.host
-    .split(',')
-    .map((h: string) => h.trim())
-    .filter(Boolean)
-  return hosts.map((h: string) => {
-    const [host, p] = h.split(':')
-    return { host, port: p ? Number(p) : profile.port }
-  })
+  return parseEnsemble(profile.host, profile.port)
 }
 
-export async function connect(id: string): Promise<void> {
+/** Hosts the monitor should probe. SSH sessions stay on the local tunnel. */
+export function getMonitorTargets(id: string): HostPort[] {
+  const session = sessions.get(id)
+  if (session?.tunnel) {
+    return [{ host: session.connectHost, port: session.connectPort }]
+  }
+  const hosts = getProfileHosts(id)
+  if (hosts.length > 0) return hosts
+  if (session) return [{ host: session.connectHost, port: session.connectPort }]
+  return []
+}
+
+export function connect(id: string): Promise<void> {
+  const current = sessions.get(id)
+  if (current && (current.status === 'connected' || current.status === 'reconnecting')) {
+    return Promise.resolve()
+  }
+  const inflight = pendingConnects.get(id)
+  if (inflight) return inflight
+
+  const job = connectInner(id).finally(() => {
+    if (pendingConnects.get(id) === job) pendingConnects.delete(id)
+  })
+  pendingConnects.set(id, job)
+  return job
+}
+
+async function connectInner(id: string): Promise<void> {
   const existing = sessions.get(id)
-  if (existing && (existing.status === 'connected' || existing.status === 'connecting')) {
-    return
-  }
-  if (existing) {
-    await disconnect(id)
-  }
+  if (existing) await disconnect(id)
 
   const profile = getConnection(id)
   if (!profile) throw new Error('Connection profile not found')
 
-  emitStatus(id, 'connecting')
-  appendLog('info', 'zk', `Connecting ${profile.name} (${profile.host}:${profile.port})`)
+  const ensemble = parseEnsemble(profile.host, profile.port)
+  if (ensemble.length === 0) throw new Error('No ZooKeeper host configured')
 
-  let tunnel: TunnelHandle | undefined
-  let connectHost = profile.host.split(',')[0].split(':')[0]
-  let connectPort = profile.port
+  const session: Session = {
+    id,
+    profile,
+    status: 'connecting',
+    connectHost: ensemble[0].host,
+    connectPort: ensemble[0].port,
+    watchedPaths: new Set(),
+  }
+  sessions.set(id, session)
+  emitStatus(id, 'connecting')
+  appendLog(
+    'info',
+    'zk',
+    `Connecting ${profile.name} (${formatEnsemble(ensemble)})`,
+  )
+
+  let established = false
 
   try {
     if (profile.ssh?.enabled) {
-      tunnel = await openSshTunnel(profile.ssh, connectHost, connectPort)
-      connectHost = '127.0.0.1'
-      connectPort = tunnel.localPort
+      const first = ensemble[0]
+      const tunnel = await openSshTunnel(profile.ssh, first.host, first.port)
+      if (!isLive(session)) {
+        await tunnel.close().catch(() => undefined)
+        throw new Error('Disconnected')
+      }
+      session.tunnel = tunnel
+      session.connectHost = '127.0.0.1'
+      session.connectPort = tunnel.localPort
+      tunnel.onUnexpectedClose(() => {
+        if (!isLive(session)) return
+        appendLog('error', 'ssh', `SSH tunnel dropped for ${profile.name}`)
+        void disconnect(id, 'SSH tunnel closed')
+      })
     }
 
-    const connectionString = `${connectHost}:${connectPort}`
+    const connectionString = session.tunnel
+      ? `${session.connectHost}:${session.connectPort}`
+      : formatEnsemble(ensemble)
     const client = zookeeper.createClient(connectionString, {
       sessionTimeout: profile.sessionTimeoutMs || 30000,
       retries: 3,
     })
-
-    const session: Session = {
-      id,
-      profile,
-      client,
-      status: 'connecting',
-      tunnel,
-      connectHost,
-      connectPort,
-      watchedPaths: new Set(),
-    }
-    sessions.set(id, session)
+    session.client = client
 
     if (profile.auth?.scheme && profile.auth?.auth) {
       client.addAuthInfo(profile.auth.scheme, Buffer.from(profile.auth.auth))
     }
 
     await new Promise<void>((resolve, reject) => {
+      let settled = false
       const timer = setTimeout(() => {
-        reject(new Error('Connection timeout'))
+        fail(new Error('Connection timeout'))
       }, profile.connectionTimeoutMs || 15000)
 
-      client.once('connected', () => {
+      function fail(err: Error) {
+        if (settled) return
+        settled = true
         clearTimeout(timer)
+        session.cancelConnect = undefined
+        reject(err)
+      }
+
+      function succeed() {
+        if (settled) return
+        settled = true
+        established = true
+        clearTimeout(timer)
+        session.cancelConnect = undefined
         resolve()
+      }
+
+      session.cancelConnect = fail
+      client.on('connected', succeed)
+      client.on('connectedReadOnly', () => {
+        appendLog('warn', 'zk', `${profile.name} connected read-only`)
+        succeed()
       })
+      client.on('authenticationFailed', () => fail(new Error('Auth failed')))
       client.on('state', (state: unknown) => {
-        if (state === State.SYNC_CONNECTED) {
-          emitStatus(id, 'connected')
-        } else if (state === State.DISCONNECTED || state === State.EXPIRED) {
-          emitStatus(id, 'reconnecting')
-          appendLog('warn', 'zk', `${profile.name} session changed`)
-        } else if (state === State.AUTH_FAILED) {
-          emitStatus(id, 'error', 'Auth failed')
+        if (!isLive(session)) return
+        if (state === State.AUTH_FAILED) {
+          fail(new Error('Auth failed'))
+          return
         }
-      })
-      client.on('connected', () => {
-        emitStatus(id, 'connected')
-      })
-      client.on('disconnected', () => {
-        emitStatus(id, 'reconnecting')
+        if (state === State.SYNC_CONNECTED || state === State.CONNECTED_READ_ONLY) {
+          succeed()
+          emitStatus(id, 'connected')
+          return
+        }
+        if (!established) return
+        if (state === State.DISCONNECTED) {
+          emitStatus(id, 'reconnecting')
+          appendLog('warn', 'zk', `${profile.name} disconnected`)
+        } else if (state === State.EXPIRED) {
+          emitStatus(id, 'error', 'Session expired')
+          appendLog('warn', 'zk', `${profile.name} session expired`)
+        }
       })
       client.connect()
     })
 
+    if (!isLive(session)) throw new Error('Disconnected')
     emitStatus(id, 'connected')
     appendLog('info', 'zk', `Connected ${profile.name}`)
   } catch (err) {
-    if (tunnel) await tunnel.close().catch(() => undefined)
-    sessions.delete(id)
     const message = err instanceof Error ? err.message : String(err)
-    emitStatus(id, 'error', message)
-    appendLog('error', 'zk', `Connect failed: ${message}`)
+    const owned = isLive(session)
+    if (owned) {
+      closeClient(session.client)
+      if (session.tunnel) await session.tunnel.close().catch(() => undefined)
+      sessions.delete(id)
+      emitStatus(id, 'error', message)
+      appendLog('error', 'zk', `Connect failed: ${message}`)
+    }
     throw err
   }
 }
 
-export async function disconnect(id: string): Promise<void> {
+export async function disconnect(id: string, error?: string): Promise<void> {
   const session = sessions.get(id)
   if (!session) {
     emitStatus(id, 'disconnected')
     return
   }
-  try {
-    session.client.close()
-  } catch {
-    /* ignore */
-  }
+  // Detach before any await so a failing connect does not emit a second status.
+  sessions.delete(id)
+  session.cancelConnect?.(new Error(error || 'Disconnected'))
+  session.cancelConnect = undefined
+  closeClient(session.client)
   if (session.tunnel) {
     await session.tunnel.close().catch(() => undefined)
   }
-  sessions.delete(id)
-  emitStatus(id, 'disconnected')
-  appendLog('info', 'zk', `Disconnected ${session.profile.name}`)
+  emitStatus(id, error ? 'error' : 'disconnected', error)
+  appendLog('info', 'zk', `Disconnected ${session.profile.name}${error ? `: ${error}` : ''}`)
 }
 
-function watchChildren(session: Session, path: string): void {
-  if (session.watchedPaths.has(`c:${path}`)) return
-  session.watchedPaths.add(`c:${path}`)
+export async function disconnectAll(): Promise<void> {
+  const ids = [...sessions.keys()]
+  for (const id of ids) {
+    await disconnect(id)
+  }
+}
+
+function watchChildren(session: Session & { client: Client }, path: string): void {
+  if (!isLive(session)) return
+  const key = `c:${path}`
+  if (session.watchedPaths.has(key)) return
+  session.watchedPaths.add(key)
   const watcher = () => {
-    session.watchedPaths.delete(`c:${path}`)
+    session.watchedPaths.delete(key)
+    if (!isLive(session)) return
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send(IPC.events.nodeChildrenChanged, { id: session.id, path })
     }
-    if (sessions.has(session.id)) watchChildren(session, path)
+    watchChildren(session, path)
   }
-  session.client.getChildren(path, watcher, () => undefined)
+  session.client.getChildren(path, watcher, (err) => {
+    if (err) session.watchedPaths.delete(key)
+  })
 }
 
-function watchData(session: Session, path: string): void {
-  if (session.watchedPaths.has(`d:${path}`)) return
-  session.watchedPaths.add(`d:${path}`)
+function watchData(session: Session & { client: Client }, path: string): void {
+  if (!isLive(session)) return
+  const key = `d:${path}`
+  if (session.watchedPaths.has(key)) return
+  session.watchedPaths.add(key)
   const watcher = () => {
-    session.watchedPaths.delete(`d:${path}`)
+    session.watchedPaths.delete(key)
+    if (!isLive(session)) return
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send(IPC.events.nodeDataChanged, { id: session.id, path })
     }
-    if (sessions.has(session.id)) watchData(session, path)
+    watchData(session, path)
   }
-  session.client.getData(path, watcher, () => undefined)
+  session.client.getData(path, watcher, (err) => {
+    if (err) session.watchedPaths.delete(key)
+  })
 }
 
 export async function listChildren(id: string, path: string): Promise<ZkChildNode[]> {
@@ -369,6 +469,7 @@ export async function setData(
   const stat = await new Promise<Stat>((resolve, reject) => {
     session.client.setData(path, Buffer.from(data, 'utf8'), version, (err, st) => {
       if (err) reject(err)
+      else if (!st) reject(new Error(`No stat returned for ${path}`))
       else resolve(st)
     })
   })
@@ -384,32 +485,35 @@ export async function createNode(
   sequential = false,
 ): Promise<string> {
   const session = ensureSession(id)
+  if (!path || path === '/' || !path.startsWith('/')) {
+    throw new Error('Invalid path')
+  }
   let mode = CreateMode.PERSISTENT
   if (ephemeral && sequential) mode = CreateMode.EPHEMERAL_SEQUENTIAL
   else if (ephemeral) mode = CreateMode.EPHEMERAL
   else if (sequential) mode = CreateMode.PERSISTENT_SEQUENTIAL
 
+  // mkdirp applies data and mode to every ancestor. Create parents empty and
+  // persistent, then create only the leaf with the requested payload and mode.
+  const parent = path.slice(0, path.lastIndexOf('/')) || '/'
+  if (parent !== '/') {
+    await new Promise<void>((resolve, reject) => {
+      try {
+        session.client.mkdirp(parent, Buffer.alloc(0), OPEN_ACL, CreateMode.PERSISTENT, (err) => {
+          if (err) reject(err)
+          else resolve()
+        })
+      } catch (err) {
+        reject(err)
+      }
+    })
+  }
+
   const created = await new Promise<string>((resolve, reject) => {
-    session.client.mkdirp(
-      path,
-      Buffer.from(data ?? '', 'utf8'),
-      OPEN_ACL,
-      mode,
-      (err, p) => {
-        if (err) {
-          session.client.create(
-            path,
-            Buffer.from(data ?? '', 'utf8'),
-            OPEN_ACL,
-            mode,
-            (err2, p2) => {
-              if (err2) reject(err2)
-              else resolve(p2)
-            },
-          )
-        } else resolve(p)
-      },
-    )
+    session.client.create(path, Buffer.from(data ?? '', 'utf8'), OPEN_ACL, mode, (err, createdPath) => {
+      if (err) reject(err)
+      else resolve(createdPath)
+    })
   })
   appendLog('info', 'zk', `create ${created}`)
   return created
@@ -417,6 +521,9 @@ export async function createNode(
 
 export async function removeNode(id: string, path: string, recursive = false): Promise<void> {
   const session = ensureSession(id)
+  if (path === '/' && !recursive) {
+    throw new Error('Cannot delete root')
+  }
   if (!recursive) {
     await new Promise<void>((resolve, reject) => {
       session.client.remove(path, -1, (err) => (err ? reject(err) : resolve()))
@@ -434,6 +541,8 @@ async function removeRecursive(client: Client, path: string): Promise<void> {
     const childPath = path === '/' ? `/${child}` : `${path}/${child}`
     await removeRecursive(client, childPath)
   }
+  // ZooKeeper rejects removal of the root znode.
+  if (path === '/') return
   await new Promise<void>((resolve, reject) => {
     client.remove(path, -1, (err) => {
       if (err && (err as { code?: number }).code === Exception.NO_NODE) resolve()
@@ -463,6 +572,7 @@ export async function setAcl(
   const stat = await new Promise<Stat>((resolve, reject) => {
     session.client.setACL(path, zkToAcl(acls), version, (err, st) => {
       if (err) reject(err)
+      else if (!st) reject(new Error(`No stat returned for ${path}`))
       else resolve(st)
     })
   })
@@ -478,7 +588,7 @@ export async function search(
 ): Promise<string[]> {
   const session = ensureSession(id)
   const found: string[] = []
-  const kw = keyword.toLowerCase().trim()
+  const kw = keyword.trim()
   if (!kw) return []
 
   // BFS — avoids deep recursion stack and feels more responsive
@@ -493,10 +603,7 @@ export async function search(
     seen.add(path)
     visited++
 
-    const name = path === '/' ? '' : (path.split('/').pop() ?? '')
-    if (name.toLowerCase().includes(kw) || path.toLowerCase().includes(kw)) {
-      if (path !== '/' || kw === '/') found.push(path)
-    }
+    if (pathMatchesKeyword(path, kw)) found.push(path)
 
     let children: string[] = []
     try {

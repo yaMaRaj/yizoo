@@ -71,3 +71,15 @@ export function parseSrvr(raw: string): Record<string, string> {
   }
   return out
 }
+
+/** `srvr` reports latency as `min/avg/max`, under a key like `latency_min/avg/max`. */
+export function readSrvrLatencyAvg(parsed: Record<string, string>): number | undefined {
+  const raw =
+    parsed.latency ??
+    Object.entries(parsed).find(([key]) => key.includes('latency'))?.[1]
+  if (!raw) return undefined
+  const parts = raw.split('/')
+  const avg = parts.length >= 2 ? parts[1] : parts[0]
+  const n = Number(avg?.trim())
+  return Number.isFinite(n) ? n : undefined
+}

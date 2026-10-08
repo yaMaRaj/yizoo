@@ -38,7 +38,13 @@ type AppState = {
   setNodeData: (data: ZkNodeData | null) => void
   setChildren: (path: string, children: string[]) => void
   setExpanded: (path: string, open: boolean) => void
-  resetWorkspaceTree: () => void
+  openWorkspace: (payload: {
+    id: string
+    children: string[]
+    node: ZkNodeData
+    samples: MonitorSample[]
+    alerts: MonitorAlert[]
+  }) => void
   setEditorDraft: (draft: string) => void
   setEditorDirty: (dirty: boolean) => void
   setEditorLang: (lang: AppState['editorLang']) => void
@@ -82,7 +88,21 @@ export const useAppStore = create<AppState>((set) => ({
   setNodeData: (nodeData) => set({ nodeData }),
   setChildren: (path, children) => set((s) => ({ tree: { ...s.tree, [path]: children } })),
   setExpanded: (path, open) => set((s) => ({ expanded: { ...s.expanded, [path]: open } })),
-  resetWorkspaceTree: () => set({ tree: {}, expanded: { '/': true }, selectedPath: '/', searchResults: [] }),
+  openWorkspace: ({ id, children, node, samples, alerts }) =>
+    set({
+      activeId: id,
+      tree: { '/': children },
+      expanded: { '/': true },
+      selectedPath: '/',
+      searchResults: [],
+      nodeData: node,
+      editorDraft: typeof node.data === 'string' ? node.data : '',
+      editorDirty: false,
+      editorLang: 'plaintext',
+      monitorSamples: samples,
+      monitorAlerts: alerts,
+      error: null,
+    }),
   setEditorDraft: (editorDraft) => set({ editorDraft }),
   setEditorDirty: (editorDirty) => set({ editorDirty }),
   setEditorLang: (editorLang) => set({ editorLang }),

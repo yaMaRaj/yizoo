@@ -29,6 +29,13 @@ export function TopBar({ onBackHome, onSwitchConnection }: Props) {
   const profile = profiles.find((p) => p.id === activeId)
 
   useEffect(() => {
+    setKeyword('')
+    setSearched(false)
+    setSearchResults([])
+    setSwitchOpen(false)
+  }, [activeId, setSearchResults])
+
+  useEffect(() => {
     if (!switchOpen) return
     const onDown = (e: MouseEvent) => {
       if (switchRef.current && !switchRef.current.contains(e.target as Node)) {

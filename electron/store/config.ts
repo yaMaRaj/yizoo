@@ -54,8 +54,18 @@ export function getSettings(): AppSettings {
   return { ...defaultSettings, ...store.get('settings') }
 }
 
+function clampMonitorInterval(ms: number): number {
+  if (!Number.isFinite(ms)) return defaultSettings.monitorIntervalMs
+  return Math.min(300_000, Math.max(1000, Math.round(ms)))
+}
+
 export function setSettings(patch: Partial<AppSettings>): AppSettings {
   const next = { ...getSettings(), ...patch }
+  next.monitorIntervalMs = clampMonitorInterval(next.monitorIntervalMs)
+  if (!Number.isFinite(next.fontSize)) next.fontSize = defaultSettings.fontSize
+  else next.fontSize = Math.min(24, Math.max(10, Math.round(next.fontSize)))
+  if (next.locale !== 'zh' && next.locale !== 'en') next.locale = defaultSettings.locale
+  if (next.theme !== 'light' && next.theme !== 'dark') next.theme = defaultSettings.theme
   store.set('settings', next)
   return next
 }
@@ -77,16 +87,16 @@ function stripSecrets(profile: ConnectionProfile): ConnectionProfile {
 }
 
 function persistSecrets(profile: ConnectionProfile): void {
-  const secrets = store.get('secrets')
-  if (profile.ssh?.password) {
-    secrets[secretKey(profile.id, 'sshPassword')] = encrypt(profile.ssh.password)
+  const secrets = { ...store.get('secrets') }
+  const write = (field: string, value: string | undefined) => {
+    const key = secretKey(profile.id, field)
+    if (value) secrets[key] = encrypt(value)
+    else delete secrets[key]
   }
-  if (profile.ssh?.passphrase) {
-    secrets[secretKey(profile.id, 'sshPassphrase')] = encrypt(profile.ssh.passphrase)
-  }
-  if (profile.auth?.auth) {
-    secrets[secretKey(profile.id, 'zkAuth')] = encrypt(profile.auth.auth)
-  }
+  // Empty values clear a previously stored secret so a wiped password stays wiped.
+  write('sshPassword', profile.ssh?.password)
+  write('sshPassphrase', profile.ssh?.passphrase)
+  write('zkAuth', profile.auth?.auth)
   store.set('secrets', secrets)
 }
 

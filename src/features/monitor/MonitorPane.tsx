@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../../store/app-store'
 
@@ -29,6 +29,13 @@ export function MonitorPane() {
   const samples = useAppStore((s) => s.monitorSamples)
   const alerts = useAppStore((s) => s.monitorAlerts)
   const [history, setHistory] = useState<Record<string, number[]>>({})
+  const prevId = useRef(activeId)
+
+  useEffect(() => {
+    if (prevId.current === activeId) return
+    prevId.current = activeId
+    setHistory({})
+  }, [activeId])
 
   useEffect(() => {
     if (!activeId) return

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ConnectionProfile } from '@shared/types'
 import { useAppStore } from '../../store/app-store'
+import { askConfirm } from '../../components/confirm-store'
 
 type Props = {
   initial: ConnectionProfile | null
@@ -23,6 +24,11 @@ export function ConnectionFormModal({ initial, onClose }: Props) {
   const { t } = useTranslation()
   const setProfiles = useAppStore((s) => s.setProfiles)
   const setError = useAppStore((s) => s.setError)
+  const activeId = useAppStore((s) => s.activeId)
+  const setActiveId = useAppStore((s) => s.setActiveId)
+  const setNodeData = useAppStore((s) => s.setNodeData)
+  const setEditorDraft = useAppStore((s) => s.setEditorDraft)
+  const setEditorDirty = useAppStore((s) => s.setEditorDirty)
   const [form, setForm] = useState<ConnectionProfile>(
     initial ?? {
       id: crypto.randomUUID(),
@@ -73,16 +79,38 @@ export function ConnectionFormModal({ initial, onClose }: Props) {
       port,
       ssh: form.ssh ? { ...form.ssh, port: sshPort } : form.ssh,
     }
-    await window.yizoo.connections.save(payload)
-    setProfiles(await window.yizoo.connections.list())
-    onClose()
+    try {
+      await window.yizoo.connections.save(payload)
+      setProfiles(await window.yizoo.connections.list())
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   async function handleDelete() {
     if (!initial) return
-    await window.yizoo.connections.remove(initial.id)
-    setProfiles(await window.yizoo.connections.list())
-    onClose()
+    const ok = await askConfirm({
+      title: t('brand'),
+      message: t('confirmDeleteConnection', { name: initial.name }),
+      confirmLabel: t('ok'),
+      cancelLabel: t('cancel'),
+      danger: true,
+    })
+    if (!ok) return
+    try {
+      await window.yizoo.connections.remove(initial.id)
+      setProfiles(await window.yizoo.connections.list())
+      if (activeId === initial.id) {
+        setActiveId(null)
+        setNodeData(null)
+        setEditorDraft('')
+        setEditorDirty(false)
+      }
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   return (

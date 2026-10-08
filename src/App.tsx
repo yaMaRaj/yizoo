@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from './store/app-store'
 import { IconNav } from './features/connections/IconNav'
@@ -27,21 +27,15 @@ export function App() {
     error,
     setError,
     activeId,
-    setActiveId,
-    setNodeData,
-    setEditorDraft,
-    setEditorDirty,
-    setEditorLang,
-    setChildren,
     setLoading,
-    setAlerts,
-    resetWorkspaceTree,
+    openWorkspace,
   } = useAppStore()
 
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<ConnectionProfile | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [showHome, setShowHome] = useState(true)
+  const connectLock = useRef(false)
 
   async function refreshProfiles() {
     setProfiles(await window.yizoo.connections.list())
@@ -66,8 +60,12 @@ export function App() {
       const file = input.files?.[0]
       if (!file) return
       const text = await file.text()
-      await window.yizoo.connections.importProfiles(text, true)
-      await refreshProfiles()
+      try {
+        await window.yizoo.connections.importProfiles(text, true)
+        await refreshProfiles()
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      }
     }
     input.click()
   }
@@ -78,45 +76,49 @@ export function App() {
   ) {
     const state = useAppStore.getState()
     if (options?.switchFromWorkspace && profile.id === state.activeId) return
+    if (connectLock.current) return
 
-    if (options?.switchFromWorkspace && state.editorDirty) {
+    if (state.editorDirty) {
+      const switchingConnection = state.activeId != null && state.activeId !== profile.id
       const ok = await askConfirm({
         title: t('brand'),
-        message: t('confirmUnsaved'),
+        message: t(switchingConnection ? 'confirmUnsavedConnection' : 'confirmUnsaved'),
         confirmLabel: t('ok'),
         cancelLabel: t('cancel'),
         danger: true,
       })
       if (!ok) return
+      if (connectLock.current) return
     }
 
+    connectLock.current = true
     setLoading(true)
     setError(null)
     try {
-      // Already-connected sessions return immediately; disconnected ones establish now
+      // Already-connected sessions return immediately; disconnected ones establish now.
+      // Workspace state is committed only after the root listing succeeds, so a failed
+      // switch cannot save the previous cluster's data into the new one.
       await window.yizoo.zk.connect(profile.id)
-      setActiveId(profile.id)
+      const [children, data, samples, alerts] = await Promise.all([
+        window.yizoo.zk.listChildren(profile.id, '/'),
+        window.yizoo.zk.getData(profile.id, '/'),
+        window.yizoo.monitor.getLatest(profile.id),
+        window.yizoo.monitor.getAlerts(profile.id),
+      ])
+      openWorkspace({
+        id: profile.id,
+        children: children.map((c) => c.name),
+        node: data,
+        samples,
+        alerts,
+      })
       setShowHome(false)
-      resetWorkspaceTree()
-      setEditorDirty(false)
-      setEditorLang('plaintext')
-      const children = await window.yizoo.zk.listChildren(profile.id, '/')
-      setChildren(
-        '/',
-        children.map((c) => c.name),
-      )
-      const data = await window.yizoo.zk.getData(profile.id, '/')
-      setNodeData(data)
-      setEditorDraft(typeof data?.data === 'string' ? data.data : '')
-      setEditorLang('plaintext')
-      const samples = await window.yizoo.monitor.getLatest(profile.id)
-      setMonitorSamples(samples)
-      setAlerts(await window.yizoo.monitor.getAlerts(profile.id))
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       // Switching from workspace: keep previous connection; from home: stay on home
       if (!options?.switchFromWorkspace) setShowHome(true)
     } finally {
+      connectLock.current = false
       setLoading(false)
     }
   }

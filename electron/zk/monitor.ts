@@ -3,8 +3,8 @@ import { randomUUID } from 'node:crypto'
 import type { MonitorAlert, MonitorSample } from '../../shared/types'
 import { IPC } from '../../shared/ipc'
 import { getSettings } from '../store/config'
-import { getProfileHosts, getSessionEndpoint, getStatus } from './session-manager'
-import { parseMntr, parseSrvr, sendFourLetter } from './four-letter'
+import { getMonitorTargets, getStatus } from './session-manager'
+import { parseMntr, parseSrvr, readSrvrLatencyAvg, sendFourLetter } from './four-letter'
 import { appendLog } from '../logger'
 
 const HISTORY_LIMIT = 60
@@ -65,10 +65,9 @@ function isWhitelistDenied(raw: string): boolean {
 }
 
 async function sampleHost(
-  connectionId: string,
   host: string,
   port: number,
-  sessionConnected: boolean,
+  sessionFallback: boolean,
 ): Promise<MonitorSample> {
   const base: MonitorSample = { ts: Date.now(), host, port, ruok: false }
   let fourLetterBlocked = false
@@ -77,11 +76,9 @@ async function sampleHost(
     const ruok = await sendFourLetter(host, port, 'ruok')
     if (isWhitelistDenied(ruok)) {
       fourLetterBlocked = true
-      // Session is up → treat as healthy; 4lw just disabled on server
-      base.ruok = sessionConnected
-      base.error = sessionConnected
-        ? '4lw ruok not whitelisted (using session health)'
-        : '4lw ruok not whitelisted'
+      // The server answered, so the process is up even though ruok is blocked.
+      base.ruok = true
+      base.error = '4lw ruok not whitelisted'
     } else {
       base.ruok = ruok.trim().toLowerCase().includes('imok')
       if (!base.ruok && ruok.trim()) {
@@ -89,13 +86,8 @@ async function sampleHost(
       }
     }
   } catch (err) {
-    // TCP failed — if ZK session is connected to this endpoint, still mark ok-ish
     base.error = err instanceof Error ? err.message : String(err)
     base.ruok = false
-    if (sessionConnected) {
-      // Keep showing metrics attempt via mntr; don't force ruok true on connect errors
-    }
-    // continue to try mntr/srvr in case only ruok failed oddly
   }
 
   try {
@@ -128,16 +120,14 @@ async function sampleHost(
     const srvrRaw = await sendFourLetter(host, port, 'srvr')
     if (isWhitelistDenied(srvrRaw)) {
       fourLetterBlocked = true
-      if (sessionConnected) {
-        base.ruok = true
-        base.error = '4lw not whitelisted (using session health)'
-      }
+      base.ruok = true
+      base.error = '4lw not whitelisted'
     } else if (srvrRaw.trim()) {
       const s = parseSrvr(srvrRaw)
       base.raw = s
       base.mode = s.mode
       base.zxid = s.zxid
-      base.latencyAvg = num(s.latency?.split('/')?.[1])
+      base.latencyAvg = readSrvrLatencyAvg(s)
       base.numAliveConnections = num(s.connections)
       base.znodeCount = num(s.node_count)
       base.ruok = true
@@ -147,8 +137,9 @@ async function sampleHost(
     if (!base.error) base.error = err instanceof Error ? err.message : String(err)
   }
 
-  // Final fallback: ZK client session is connected
-  if (!base.ruok && sessionConnected && !base.error?.includes('ECONNREFUSED')) {
+  // A single reachable session can stand in for 4lw when the server blocks it.
+  // Ensemble members are judged on their own 4lw result so a dead peer stays red.
+  if (!base.ruok && sessionFallback) {
     base.ruok = true
     base.error = fourLetterBlocked
       ? '4lw not whitelisted (using session health)'
@@ -167,24 +158,27 @@ function num(v?: string): number | undefined {
 async function tick(id: string): Promise<void> {
   const status = getStatus(id)
   if (status !== 'connected' && status !== 'reconnecting') {
+    // Session is gone (disconnect / failed connect). Drop the timer so it does not
+    // spin forever. A live session in `error` (for example expired) keeps the timer
+    // so sampling resumes if the client recovers.
+    if (status === 'disconnected') {
+      const state = monitors.get(id)
+      if (state?.timer) {
+        clearInterval(state.timer)
+        state.timer = undefined
+      }
+    }
     return
   }
   const sessionConnected = status === 'connected' || status === 'reconnecting'
   const state = ensureState(id)
-  const endpoint = getSessionEndpoint(id)
-
-  // Prefer the live session endpoint only (avoids probing remote host when tunneled,
-  // and avoids false ruok failures against unreachable advertised hosts).
-  let hosts: Array<{ host: string; port: number }> = []
-  if (endpoint) {
-    hosts = [endpoint]
-  } else {
-    hosts = getProfileHosts(id)
-  }
+  // Tunnel sessions probe localhost only. Ensembles probe every configured host.
+  const hosts = getMonitorTargets(id)
+  const sessionFallback = hosts.length === 1 && sessionConnected
 
   const samples: MonitorSample[] = []
   for (const h of hosts) {
-    const sample = await sampleHost(id, h.host, h.port, sessionConnected)
+    const sample = await sampleHost(h.host, h.port, sessionFallback)
     samples.push(sample)
     const key = `${h.host}:${h.port}`
     const hist = state.history.get(key) ?? []
@@ -250,16 +244,36 @@ async function tick(id: string): Promise<void> {
   }
 }
 
+export function monitorIntervalMs(): number {
+  const ms = getSettings().monitorIntervalMs
+  if (!Number.isFinite(ms)) return 5000
+  return Math.min(300_000, Math.max(1000, Math.round(ms)))
+}
+
 export function startMonitor(id: string): void {
   const state = ensureState(id)
   if (state.timer) return
-  const interval = getSettings().monitorIntervalMs || 5000
   const run = () => {
     tick(id).catch((err) => appendLog('error', 'monitor', String(err)))
   }
   run()
-  state.timer = setInterval(run, interval)
+  state.timer = setInterval(run, monitorIntervalMs())
   appendLog('info', 'monitor', `Started monitor for ${id}`)
+}
+
+export function restartMonitorIntervals(): void {
+  const interval = monitorIntervalMs()
+  for (const [id, state] of monitors) {
+    if (!state.timer) continue
+    clearInterval(state.timer)
+    state.timer = setInterval(() => {
+      tick(id).catch((err) => appendLog('error', 'monitor', String(err)))
+    }, interval)
+  }
+}
+
+export function stopAllMonitors(): void {
+  for (const id of [...monitors.keys()]) stopMonitor(id)
 }
 
 export function stopMonitor(id: string): void {

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../../store/app-store'
 
@@ -10,12 +10,19 @@ export function FourLetterPane() {
   const [cmd, setCmd] = useState('mntr')
   const [out, setOut] = useState('')
 
+  useEffect(() => {
+    setOut('')
+  }, [activeId])
+
   async function run() {
     if (!activeId) return
+    const id = activeId
     try {
-      const text = await window.yizoo.zk.fourLetter(activeId, cmd)
+      const text = await window.yizoo.zk.fourLetter(id, cmd)
+      if (useAppStore.getState().activeId !== id) return
       setOut(text || '(empty)')
     } catch (err) {
+      if (useAppStore.getState().activeId !== id) return
       setOut(err instanceof Error ? err.message : String(err))
     }
   }

@@ -32,7 +32,10 @@ function prettyXml(text: string): string {
 }
 
 /** Pure view transform — never used as the saved payload unless user edits. */
-function formatForView(canonical: string, format: ViewFormat): { text: string; error?: string } {
+function formatForView(
+  canonical: string,
+  format: ViewFormat,
+): { text: string; error?: 'json' | 'xml'; message?: string } {
   if (format === 'raw') return { text: canonical }
   try {
     if (format === 'json') return { text: prettyJson(canonical) }
@@ -40,10 +43,8 @@ function formatForView(canonical: string, format: ViewFormat): { text: string; e
   } catch (err) {
     return {
       text: canonical,
-      error:
-        format === 'json'
-          ? `无法解析为 JSON：${err instanceof Error ? err.message : String(err)}`
-          : `无法格式化为 XML：${err instanceof Error ? err.message : String(err)}`,
+      error: format === 'json' ? 'json' : 'xml',
+      message: err instanceof Error ? err.message : String(err),
     }
   }
 }
@@ -79,7 +80,7 @@ export function DataEditor() {
   const [newData, setNewData] = useState('')
   const [ephemeral, setEphemeral] = useState(false)
   const [sequential, setSequential] = useState(false)
-  const [aclDraft, setAclDraft] = useState<ZkAcl[]>([])
+  const [aclDraft, setAclDraft] = useState<ZkAcl[] | null>(null)
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
   const [findIndex, setFindIndex] = useState(0)
@@ -90,8 +91,8 @@ export function DataEditor() {
   /** Skip the first Monaco onChange after format switch (it echoes display text). */
   const ignoreNextChangeRef = useRef(false)
   const composingRef = useRef(false)
-  /** Epoch of last external load (path / server refresh) so we don't clobber in-progress edits. */
-  const loadKeyRef = useRef(`${selectedPath}::`)
+  /** Epoch of last external load (connection / path / server refresh). */
+  const loadKeyRef = useRef('')
 
   const serverData = nodeData?.data ?? ''
   const canonical = editorDraft ?? ''
@@ -106,20 +107,23 @@ export function DataEditor() {
     setViewFormat('raw')
     setEditorLang('plaintext')
     setTab('data')
+    setAclDraft(null)
     setFindOpen(false)
     setFindQuery('')
     setFindIndex(0)
     setFindCount(0)
-  }, [selectedPath, setEditorLang])
+  }, [activeId, selectedPath, setEditorLang])
 
-  // Sync view buffer when path changes or server data reloads while clean
+  // Sync view buffer when connection/path changes or server data reloads while clean
   useEffect(() => {
-    const pathChanged = loadKeyRef.current.split('::')[0] !== selectedPath
-    loadKeyRef.current = `${selectedPath}::${nodeData?.stat.version ?? ''}:${nodeData?.stat.mtime ?? ''}`
-    if (pathChanged || !editorDirty) {
-      setViewText(formatForView(editorDraft ?? '', pathChanged ? 'raw' : viewFormat).text)
+    const ctx = `${activeId ?? ''}:${selectedPath}`
+    const contextChanged = loadKeyRef.current.split('::')[0] !== ctx
+    loadKeyRef.current = `${ctx}::${nodeData?.stat.version ?? ''}:${nodeData?.stat.mtime ?? ''}`
+    if (contextChanged || !editorDirty) {
+      setViewText(formatForView(editorDraft ?? '', contextChanged ? 'raw' : viewFormat).text)
     }
   }, [
+    activeId,
     selectedPath,
     nodeData?.stat.version,
     nodeData?.stat.mtime,
@@ -149,7 +153,11 @@ export function DataEditor() {
     if (next === viewFormat) return
     const result = formatForView(canonical, next)
     if (result.error && next !== 'raw') {
-      setError(result.error)
+      setError(
+        t(result.error === 'json' ? 'jsonFormatError' : 'xmlFormatError', {
+          message: result.message ?? '',
+        }),
+      )
       return
     }
     setError(null)
@@ -292,19 +300,24 @@ export function DataEditor() {
     return <div className="empty-state">{t('empty')}</div>
   }
 
+  function stillViewing(id: string, path: string): boolean {
+    const latest = useAppStore.getState()
+    return latest.activeId === id && latest.selectedPath === path
+  }
+
   async function saveData() {
     if (!activeId || !nodeData) return
+    const id = activeId
+    const path = selectedPath
+    const version = nodeData.stat.version
     try {
-      const stat = await window.yizoo.zk.setData(
-        activeId,
-        selectedPath,
-        canonical,
-        nodeData.stat.version,
-      )
+      const stat = await window.yizoo.zk.setData(id, path, canonical, version)
+      if (!stillViewing(id, path)) return
       setNodeData({ ...nodeData, data: canonical, stat })
       setEditorDirty(false)
       setError(null)
     } catch (err) {
+      if (!stillViewing(id, path)) return
       const msg = err instanceof Error ? err.message : String(err)
       setError(msg.includes('BadVersion') ? t('versionConflict') : msg)
     }
@@ -312,8 +325,11 @@ export function DataEditor() {
 
   async function refresh() {
     if (!activeId) return
+    const id = activeId
+    const path = selectedPath
     try {
-      const data = await window.yizoo.zk.getData(activeId, selectedPath)
+      const data = await window.yizoo.zk.getData(id, path)
+      if (!stillViewing(id, path)) return
       const text = typeof data?.data === 'string' ? data.data : ''
       setNodeData(data)
       setEditorDraft(text)
@@ -321,15 +337,22 @@ export function DataEditor() {
       setViewFormat('raw')
       setViewText(text)
       setEditorLang('plaintext')
-      setAclDraft(data.acls ?? [])
+      setAclDraft(null)
       setError(null)
     } catch (err) {
+      if (!stillViewing(id, path)) return
       setError(err instanceof Error ? err.message : String(err))
     }
   }
 
   async function remove(recursive: boolean) {
     if (!activeId) return
+    if (selectedPath === '/' && !recursive) {
+      setError(t('cannotDeleteRoot'))
+      return
+    }
+    const id = activeId
+    const path = selectedPath
     const ok = await askConfirm({
       title: t('brand'),
       message: t('confirmDelete'),
@@ -337,44 +360,70 @@ export function DataEditor() {
       cancelLabel: t('cancel'),
       danger: true,
     })
-    if (!ok) return
-    await window.yizoo.zk.remove(activeId, selectedPath, recursive)
-    const parent =
-      selectedPath === '/' ? '/' : selectedPath.slice(0, selectedPath.lastIndexOf('/')) || '/'
-    const kids = await window.yizoo.zk.listChildren(activeId, parent)
-    setChildren(
-      parent,
-      kids.map((k) => k.name),
-    )
-    window.dispatchEvent(new CustomEvent('yizoo:select-path', { detail: parent }))
+    if (!ok || !stillViewing(id, path)) return
+    try {
+      await window.yizoo.zk.remove(id, path, recursive)
+      if (useAppStore.getState().activeId !== id) return
+      const parent = path === '/' ? '/' : path.slice(0, path.lastIndexOf('/')) || '/'
+      const kids = await window.yizoo.zk.listChildren(id, parent)
+      if (useAppStore.getState().activeId !== id) return
+      setChildren(
+        parent,
+        kids.map((k) => k.name),
+      )
+      window.dispatchEvent(new CustomEvent('yizoo:select-path', { detail: parent }))
+    } catch (err) {
+      if (useAppStore.getState().activeId !== id) return
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   async function create() {
-    if (!activeId || !newPath) return
+    if (!activeId || !newPath.trim()) return
+    const id = activeId
     const full = newPath.startsWith('/')
       ? newPath
       : selectedPath === '/'
         ? `/${newPath}`
         : `${selectedPath}/${newPath}`
-    await window.yizoo.zk.create(activeId, full, newData, ephemeral, sequential)
-    setCreateOpen(false)
-    setNewPath('')
-    setNewData('')
-    const parent = full.slice(0, full.lastIndexOf('/')) || '/'
-    const kids = await window.yizoo.zk.listChildren(activeId, parent)
-    setChildren(
-      parent,
-      kids.map((k) => k.name),
-    )
-    window.dispatchEvent(new CustomEvent('yizoo:select-path', { detail: full }))
+    try {
+      const created = await window.yizoo.zk.create(id, full, newData, ephemeral, sequential)
+      if (useAppStore.getState().activeId !== id) return
+      setCreateOpen(false)
+      setNewPath('')
+      setNewData('')
+      const parent = created.slice(0, created.lastIndexOf('/')) || '/'
+      const kids = await window.yizoo.zk.listChildren(id, parent)
+      if (useAppStore.getState().activeId !== id) return
+      setChildren(
+        parent,
+        kids.map((k) => k.name),
+      )
+      window.dispatchEvent(new CustomEvent('yizoo:select-path', { detail: created }))
+    } catch (err) {
+      if (useAppStore.getState().activeId !== id) return
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   async function saveAcl() {
     if (!activeId || !nodeData) return
-    const acls = aclDraft.length ? aclDraft : nodeData.acls
-    const stat = await window.yizoo.zk.setAcl(activeId, selectedPath, acls, nodeData.stat.aversion)
-    setNodeData({ ...nodeData, acls, stat })
+    const id = activeId
+    const path = selectedPath
+    const acls = aclDraft ?? nodeData.acls
+    try {
+      const stat = await window.yizoo.zk.setAcl(id, path, acls, nodeData.stat.aversion)
+      if (!stillViewing(id, path)) return
+      setNodeData({ ...nodeData, acls, stat })
+      setAclDraft(acls)
+      setError(null)
+    } catch (err) {
+      if (!stillViewing(id, path)) return
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
+
+  const shownAcls = aclDraft ?? nodeData?.acls ?? []
 
   const dataLength = nodeData.stat?.dataLength ?? 0
 
@@ -389,7 +438,7 @@ export function DataEditor() {
               className={`tab ${tab === k ? 'active' : ''}`}
               onClick={() => {
                 setTab(k)
-                if (k === 'acl') setAclDraft(nodeData.acls)
+                if (k === 'acl' && aclDraft == null) setAclDraft(nodeData.acls.map((a) => ({ ...a })))
               }}
             >
               {t(k)}
@@ -443,7 +492,7 @@ export function DataEditor() {
           </button>
         )}
         <button className="btn" type="button" onClick={() => void refresh()}>
-          Refresh
+          {t('refresh')}
         </button>
         <button className="btn" type="button" onClick={() => setCreateOpen(true)}>
           {t('createNode')}
@@ -566,14 +615,14 @@ export function DataEditor() {
                 </tr>
               </thead>
               <tbody>
-                {(aclDraft.length ? aclDraft : nodeData.acls).map((a, idx) => (
+                {shownAcls.map((a, idx) => (
                   <tr key={`${a.scheme}-${a.id}-${idx}`}>
                     <td>
                       <input
                         className="input"
                         value={a.scheme}
                         onChange={(e) => {
-                          const next = [...(aclDraft.length ? aclDraft : nodeData.acls)]
+                          const next = [...shownAcls]
                           next[idx] = { ...next[idx], scheme: e.target.value }
                           setAclDraft(next)
                         }}
@@ -584,7 +633,7 @@ export function DataEditor() {
                         className="input"
                         value={a.id}
                         onChange={(e) => {
-                          const next = [...(aclDraft.length ? aclDraft : nodeData.acls)]
+                          const next = [...shownAcls]
                           next[idx] = { ...next[idx], id: e.target.value }
                           setAclDraft(next)
                         }}
@@ -596,7 +645,7 @@ export function DataEditor() {
                         type="number"
                         value={a.perms}
                         onChange={(e) => {
-                          const next = [...(aclDraft.length ? aclDraft : nodeData.acls)]
+                          const next = [...shownAcls]
                           next[idx] = { ...next[idx], perms: Number(e.target.value) }
                           setAclDraft(next)
                         }}
@@ -607,8 +656,7 @@ export function DataEditor() {
                         className="btn btn-ghost"
                         type="button"
                         onClick={() => {
-                          const base = aclDraft.length ? aclDraft : nodeData.acls
-                          setAclDraft(base.filter((_, i) => i !== idx))
+                          setAclDraft(shownAcls.filter((_, i) => i !== idx))
                         }}
                       >
                         ×
@@ -624,7 +672,7 @@ export function DataEditor() {
               style={{ marginTop: 8 }}
               onClick={() =>
                 setAclDraft([
-                  ...(aclDraft.length ? aclDraft : nodeData.acls),
+                  ...shownAcls,
                   { scheme: 'world', id: 'anyone', perms: PERM.ALL },
                 ])
               }

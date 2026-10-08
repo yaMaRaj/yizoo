@@ -44,10 +44,53 @@ export function TerminalPane() {
     term.writeln('YIZoo ZooKeeper shell — type help')
     redrawInput(term, '')
 
+    const executeLine = async (line: string) => {
+      redrawInput(term, line)
+      term.write('\r\n')
+      const id = useAppStore.getState().activeId
+      if (!id) {
+        term.writeln('\x1b[31mNot connected\x1b[0m')
+        return
+      }
+      if (!line.trim()) return
+      historyRef.current.push(line)
+      histIdxRef.current = -1
+      try {
+        const res = await window.yizoo.zk.executeCli(id, line)
+        if (termRef.current !== term) return
+        const color = res.ok ? '' : '\x1b[31m'
+        for (const outLine of (res.output || '').split('\n')) {
+          term.writeln(`${color}${outLine}\x1b[0m`)
+        }
+      } catch (err) {
+        if (termRef.current !== term) return
+        const message = err instanceof Error ? err.message : String(err)
+        term.writeln(`\x1b[31m${message}\x1b[0m`)
+      }
+    }
+
+    const submitLine = async () => {
+      const line = lineRef.current
+      lineRef.current = ''
+      busyRef.current = true
+      try {
+        await executeLine(line)
+      } finally {
+        busyRef.current = false
+        if (termRef.current === term) writePrompt()
+      }
+    }
+
     const onData = (data: string) => {
       if (busyRef.current) return
       const id = useAppStore.getState().activeId
 
+      if (data === '\x03') {
+        lineRef.current = ''
+        term.write('^C')
+        writePrompt()
+        return
+      }
       if (data === '\x1b[A') {
         const hist = historyRef.current
         if (!hist.length) return
@@ -76,28 +119,34 @@ export function TerminalPane() {
         return
       }
       if (data === '\r') {
-        const line = lineRef.current
-        term.write('\r\n')
-        if (!id) {
-          term.writeln('\x1b[31mNot connected\x1b[0m')
-          writePrompt()
-          return
-        }
-        if (!line.trim()) {
-          writePrompt()
-          return
-        }
-        historyRef.current.push(line)
-        histIdxRef.current = -1
+        void submitLine()
+        return
+      }
+      if (data.includes('\r') || data.includes('\n')) {
+        let parts = data.split(/\r\n|\n|\r/)
+        const endsWithBreak = /[\r\n]$/.test(data)
+        if (endsWithBreak && parts[parts.length - 1] === '') parts = parts.slice(0, -1)
         busyRef.current = true
-        void window.yizoo.zk.executeCli(id, line).then((res) => {
-          const color = res.ok ? '' : '\x1b[31m'
-          for (const outLine of (res.output || '').split('\n')) {
-            term.writeln(`${color}${outLine}\x1b[0m`)
+        void (async () => {
+          try {
+            const lines = parts.length === 0 ? [''] : parts
+            for (let i = 0; i < lines.length; i++) {
+              lineRef.current += lines[i]
+              const submitThis = endsWithBreak || i < lines.length - 1
+              if (!submitThis) {
+                redrawInput(term, lineRef.current)
+                break
+              }
+              const line = lineRef.current
+              lineRef.current = ''
+              await executeLine(line)
+              if (termRef.current !== term) return
+              writePrompt()
+            }
+          } finally {
+            busyRef.current = false
           }
-          busyRef.current = false
-          writePrompt()
-        })
+        })()
         return
       }
       if (data === '\x7f' || data === '\b') {

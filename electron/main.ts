@@ -3,6 +3,8 @@ import path from 'node:path'
 import { registerIpc } from './ipc/handlers'
 import { appendLog } from './logger'
 import { buildAppMenu } from './menu'
+import { disconnectAll } from './zk/session-manager'
+import { stopAllMonitors } from './zk/monitor'
 
 process.env.DIST_ELECTRON = path.join(__dirname)
 process.env.DIST = path.join(__dirname, '../dist')
@@ -58,4 +60,22 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+let allowQuit = false
+app.on('before-quit', (event) => {
+  if (allowQuit) return
+  event.preventDefault()
+  allowQuit = true
+  void (async () => {
+    try {
+      stopAllMonitors()
+      await Promise.race([
+        disconnectAll(),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ])
+    } finally {
+      app.quit()
+    }
+  })()
 })
