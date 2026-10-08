@@ -2,16 +2,16 @@ import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../../store/app-store'
 
 type Props = {
+  showHome: boolean
   onNew: () => void
   onOpenSettings: () => void
   onShowHome: () => void
 }
 
-export function IconNav({ onNew, onOpenSettings, onShowHome }: Props) {
+export function IconNav({ showHome, onNew, onOpenSettings, onShowHome }: Props) {
   const { t } = useTranslation()
   const settings = useAppStore((s) => s.settings)
   const setSettings = useAppStore((s) => s.setSettings)
-  const activeId = useAppStore((s) => s.activeId)
 
   async function toggleTheme() {
     const theme = settings.theme === 'dark' ? 'light' : 'dark'
@@ -33,7 +33,7 @@ export function IconNav({ onNew, onOpenSettings, onShowHome }: Props) {
       </button>
       <button
         type="button"
-        className={`icon-btn ${!activeId ? 'active' : ''}`}
+        className={`icon-btn ${showHome ? 'active' : ''}`}
         onClick={onShowHome}
         title={t('connections')}
       >

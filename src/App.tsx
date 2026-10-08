@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from './store/app-store'
 import { IconNav } from './features/connections/IconNav'
@@ -26,6 +26,7 @@ export function App() {
     settings,
     error,
     setError,
+    loading,
     activeId,
     setActiveId,
     setNodeData,
@@ -42,6 +43,7 @@ export function App() {
   const [editing, setEditing] = useState<ConnectionProfile | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [showHome, setShowHome] = useState(true)
+  const connectSeq = useRef(0)
 
   async function refreshProfiles() {
     setProfiles(await window.yizoo.connections.list())
@@ -90,34 +92,40 @@ export function App() {
       if (!ok) return
     }
 
+    const seq = ++connectSeq.current
     setLoading(true)
     setError(null)
     try {
       // Already-connected sessions return immediately; disconnected ones establish now
       await window.yizoo.zk.connect(profile.id)
+      if (seq !== connectSeq.current) return
       setActiveId(profile.id)
       setShowHome(false)
       resetWorkspaceTree()
       setEditorDirty(false)
       setEditorLang('plaintext')
       const children = await window.yizoo.zk.listChildren(profile.id, '/')
+      if (seq !== connectSeq.current) return
       setChildren(
         '/',
         children.map((c) => c.name),
       )
       const data = await window.yizoo.zk.getData(profile.id, '/')
+      if (seq !== connectSeq.current) return
       setNodeData(data)
       setEditorDraft(typeof data?.data === 'string' ? data.data : '')
       setEditorLang('plaintext')
       const samples = await window.yizoo.monitor.getLatest(profile.id)
+      if (seq !== connectSeq.current) return
       setMonitorSamples(samples)
       setAlerts(await window.yizoo.monitor.getAlerts(profile.id))
     } catch (err) {
+      if (seq !== connectSeq.current) return
       setError(err instanceof Error ? err.message : String(err))
       // Switching from workspace: keep previous connection; from home: stay on home
       if (!options?.switchFromWorkspace) setShowHome(true)
     } finally {
-      setLoading(false)
+      if (seq === connectSeq.current) setLoading(false)
     }
   }
 
@@ -139,7 +147,7 @@ export function App() {
     const offs = [
       window.yizoo.on.connectionStatus(({ id, status, error: err }) => {
         setStatus(id, status)
-        if (err) setError(err)
+        if (err && id === useAppStore.getState().activeId) setError(err)
       }),
       window.yizoo.on.log((entry) => pushLog(entry)),
       window.yizoo.on.monitorSample(({ id, samples }) => {
@@ -152,6 +160,7 @@ export function App() {
         if (id !== useAppStore.getState().activeId) return
         try {
           const children = await window.yizoo.zk.listChildren(id, path)
+          if (id !== useAppStore.getState().activeId) return
           useAppStore.getState().setChildren(
             path,
             children.map((c) => c.name),
@@ -208,6 +217,7 @@ export function App() {
   return (
     <div className="app-shell">
       <IconNav
+        showHome={showHome}
         onNew={() => {
           setEditing(null)
           setFormOpen(true)
@@ -217,6 +227,11 @@ export function App() {
       />
 
       <div className="workspace">
+        {loading && (
+          <div className="workspace-loading" role="status">
+            {t('loadingConnection')}
+          </div>
+        )}
         {inWorkspace ? (
           <>
             <TopBar

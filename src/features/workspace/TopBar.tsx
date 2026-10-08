@@ -19,6 +19,7 @@ export function TopBar({ onBackHome, onSwitchConnection }: Props) {
     setSelectedPath,
     setError,
     profiles,
+    loading,
   } = useAppStore()
   const [keyword, setKeyword] = useState('')
   const [searching, setSearching] = useState(false)
@@ -51,14 +52,17 @@ export function TopBar({ onBackHome, onSwitchConnection }: Props) {
     setSearching(true)
     setSearched(true)
     setError(null)
+    const id = activeId
     try {
-      const paths = await window.yizoo.zk.search(activeId, '/', keyword.trim(), 100)
+      const paths = await window.yizoo.zk.search(id, '/', keyword.trim(), 100)
+      if (useAppStore.getState().activeId !== id) return
       setSearchResults(paths)
     } catch (err) {
+      if (useAppStore.getState().activeId !== id) return
       setSearchResults([])
       setError(err instanceof Error ? err.message : String(err))
     } finally {
-      setSearching(false)
+      if (useAppStore.getState().activeId === id) setSearching(false)
     }
   }
 
@@ -83,6 +87,7 @@ export function TopBar({ onBackHome, onSwitchConnection }: Props) {
                 title={t('switchConnection')}
                 aria-expanded={switchOpen}
                 aria-haspopup="listbox"
+                disabled={loading}
                 onClick={() => setSwitchOpen((v) => !v)}
               >
                 <span>{profile?.name ?? ''}</span>
@@ -111,7 +116,7 @@ export function TopBar({ onBackHome, onSwitchConnection }: Props) {
                             <span className="connection-switcher-item-name">{p.name}</span>
                             <span className="connection-switcher-item-meta">
                               {p.host}:{p.port}
-                              {st === 'connected' ? '' : ` · ${st}`}
+                              {st === 'connected' ? '' : ` · ${t(`status_${st}`)}`}
                             </span>
                           </span>
                         </button>

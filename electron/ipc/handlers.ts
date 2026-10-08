@@ -10,7 +10,11 @@ import type { ConnectionProfile, ZkAcl, AppSettings } from '../../shared/types'
 export function registerIpc(): void {
   ipcMain.handle(IPC.connections.list, () => config.listConnections())
   ipcMain.handle(IPC.connections.save, (_e, profile: ConnectionProfile) => config.saveConnection(profile))
-  ipcMain.handle(IPC.connections.remove, (_e, id: string) => config.removeConnection(id))
+  ipcMain.handle(IPC.connections.remove, async (_e, id: string) => {
+    monitor.stopMonitor(id)
+    await zk.disconnect(id)
+    config.removeConnection(id)
+  })
   ipcMain.handle(IPC.connections.export, (_e, includeSecrets: boolean) =>
     config.exportProfiles(includeSecrets),
   )
@@ -70,7 +74,17 @@ export function registerIpc(): void {
   ipcMain.handle(IPC.monitor.getAlerts, (_e, id: string) => monitor.getAlerts(id))
 
   ipcMain.handle(IPC.settings.get, () => config.getSettings())
-  ipcMain.handle(IPC.settings.set, (_e, patch: Partial<AppSettings>) => config.setSettings(patch))
+  ipcMain.handle(IPC.settings.set, (_e, patch: Partial<AppSettings>) => {
+    const prev = config.getSettings()
+    const next = config.setSettings(patch)
+    if (
+      patch.monitorIntervalMs != null &&
+      patch.monitorIntervalMs !== prev.monitorIntervalMs
+    ) {
+      monitor.restartAllMonitors()
+    }
+    return next
+  })
 
   ipcMain.handle(IPC.logs.list, () => logger.listLogs())
   ipcMain.handle(IPC.logs.clear, () => logger.clearLogs())

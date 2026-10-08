@@ -43,7 +43,7 @@ export function SettingsModal({ onClose }: Props) {
             <span>{settings.fontSize}px</span>
           </div>
           <div className="form-row">
-            <label>Monitor interval (ms)</label>
+            <label>{t('monitorInterval')}</label>
             <input
               className="input"
               type="number"

@@ -54,10 +54,6 @@ export function ConnectionBoard({ onEdit, onConnect }: Props) {
   }
 
   async function handleDelete(profile: ConnectionProfile) {
-    const status = statuses[profile.id] ?? 'disconnected'
-    if (status === 'connected' || status === 'reconnecting') {
-      await window.yizoo.zk.disconnect(profile.id)
-    }
     const ok = await askConfirm({
       title: t('brand'),
       message: t('confirmDeleteConnection', { name: profile.name }),
@@ -77,7 +73,7 @@ export function ConnectionBoard({ onEdit, onConnect }: Props) {
   }
 
   function statusLabel(status: ConnectionStatus): string {
-    return status
+    return t(`status_${status}`)
   }
 
   return (

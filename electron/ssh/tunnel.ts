@@ -57,13 +57,19 @@ export async function openSshTunnel(
     )
   })
 
-  const localPort = await new Promise<number>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address() as AddressInfo
-      resolve(addr.port)
+  let localPort: number
+  try {
+    localPort = await new Promise<number>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address() as AddressInfo
+        resolve(addr.port)
+      })
     })
-  })
+  } catch (err) {
+    conn.end()
+    throw err
+  }
 
   appendLog(
     'info',

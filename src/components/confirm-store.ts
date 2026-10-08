@@ -30,6 +30,7 @@ export const useConfirmStore = create<ConfirmState>((set, get) => ({
   resolve: null,
   ask: (options) =>
     new Promise<boolean>((resolve) => {
+      get().resolve?.(false)
       set({
         open: true,
         title: options.title ?? 'YIZoo',

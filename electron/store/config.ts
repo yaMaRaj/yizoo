@@ -78,15 +78,14 @@ function stripSecrets(profile: ConnectionProfile): ConnectionProfile {
 
 function persistSecrets(profile: ConnectionProfile): void {
   const secrets = store.get('secrets')
-  if (profile.ssh?.password) {
-    secrets[secretKey(profile.id, 'sshPassword')] = encrypt(profile.ssh.password)
+  const setOrDelete = (field: string, value?: string) => {
+    const key = secretKey(profile.id, field)
+    if (value) secrets[key] = encrypt(value)
+    else delete secrets[key]
   }
-  if (profile.ssh?.passphrase) {
-    secrets[secretKey(profile.id, 'sshPassphrase')] = encrypt(profile.ssh.passphrase)
-  }
-  if (profile.auth?.auth) {
-    secrets[secretKey(profile.id, 'zkAuth')] = encrypt(profile.auth.auth)
-  }
+  setOrDelete('sshPassword', profile.ssh?.password)
+  setOrDelete('sshPassphrase', profile.ssh?.passphrase)
+  setOrDelete('zkAuth', profile.auth?.auth)
   store.set('secrets', secrets)
 }
 

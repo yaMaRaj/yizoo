@@ -266,8 +266,17 @@ export function stopMonitor(id: string): void {
   const state = monitors.get(id)
   if (!state) return
   if (state.timer) clearInterval(state.timer)
-  state.timer = undefined
+  monitors.delete(id)
   appendLog('info', 'monitor', `Stopped monitor for ${id}`)
+}
+
+export function restartAllMonitors(): void {
+  for (const [id, state] of monitors) {
+    if (!state.timer) continue
+    clearInterval(state.timer)
+    state.timer = undefined
+    startMonitor(id)
+  }
 }
 
 export function getLatest(id: string): MonitorSample[] {

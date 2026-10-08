@@ -32,6 +32,18 @@ type Session = {
 }
 
 const sessions = new Map<string, Session>()
+const connecting = new Map<string, Promise<void>>()
+
+function parseProfileHosts(profile: ConnectionProfile): Array<{ host: string; port: number }> {
+  return profile.host
+    .split(',')
+    .map((h: string) => h.trim())
+    .filter(Boolean)
+    .map((h: string) => {
+      const [host, p] = h.split(':')
+      return { host, port: p ? Number(p) : profile.port }
+    })
+}
 
 function emitStatus(id: string, status: ConnectionStatus, error?: string): void {
   const session = sessions.get(id)
@@ -185,19 +197,28 @@ export function getSessionEndpoint(id: string): { host: string; port: number } |
 export function getProfileHosts(id: string): Array<{ host: string; port: number }> {
   const profile = getConnection(id) ?? sessions.get(id)?.profile
   if (!profile) return []
-  const hosts = profile.host
-    .split(',')
-    .map((h: string) => h.trim())
-    .filter(Boolean)
-  return hosts.map((h: string) => {
-    const [host, p] = h.split(':')
-    return { host, port: p ? Number(p) : profile.port }
-  })
+  return parseProfileHosts(profile)
 }
 
 export async function connect(id: string): Promise<void> {
+  const pending = connecting.get(id)
+  if (pending) return pending
+
   const existing = sessions.get(id)
-  if (existing && (existing.status === 'connected' || existing.status === 'connecting')) {
+  if (existing && (existing.status === 'connected' || existing.status === 'reconnecting')) {
+    return
+  }
+
+  const task = connectInternal(id).finally(() => {
+    if (connecting.get(id) === task) connecting.delete(id)
+  })
+  connecting.set(id, task)
+  return task
+}
+
+async function connectInternal(id: string): Promise<void> {
+  const existing = sessions.get(id)
+  if (existing && (existing.status === 'connected' || existing.status === 'reconnecting')) {
     return
   }
   if (existing) {
@@ -210,9 +231,11 @@ export async function connect(id: string): Promise<void> {
   emitStatus(id, 'connecting')
   appendLog('info', 'zk', `Connecting ${profile.name} (${profile.host}:${profile.port})`)
 
+  const hosts = parseProfileHosts(profile)
+  const first = hosts[0]
   let tunnel: TunnelHandle | undefined
-  let connectHost = profile.host.split(',')[0].split(':')[0]
-  let connectPort = profile.port
+  let connectHost = first?.host ?? profile.host.split(',')[0].split(':')[0]
+  let connectPort = first?.port ?? profile.port
 
   try {
     if (profile.ssh?.enabled) {
@@ -221,7 +244,11 @@ export async function connect(id: string): Promise<void> {
       connectPort = tunnel.localPort
     }
 
-    const connectionString = `${connectHost}:${connectPort}`
+    const connectionString = profile.ssh?.enabled
+      ? `${connectHost}:${connectPort}`
+      : hosts.length > 0
+        ? hosts.map((h) => `${h.host}:${h.port}`).join(',')
+        : `${connectHost}:${connectPort}`
     const client = zookeeper.createClient(connectionString, {
       sessionTimeout: profile.sessionTimeoutMs || 30000,
       retries: 3,
@@ -244,15 +271,24 @@ export async function connect(id: string): Promise<void> {
     }
 
     await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const finish = (err?: Error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (err) reject(err)
+        else resolve()
+      }
       const timer = setTimeout(() => {
-        reject(new Error('Connection timeout'))
+        finish(new Error('Connection timeout'))
       }, profile.connectionTimeoutMs || 15000)
 
+      const isCurrent = () => sessions.get(id)?.client === client
       client.once('connected', () => {
-        clearTimeout(timer)
-        resolve()
+        finish()
       })
       client.on('state', (state: unknown) => {
+        if (!isCurrent()) return
         if (state === State.SYNC_CONNECTED) {
           emitStatus(id, 'connected')
         } else if (state === State.DISCONNECTED || state === State.EXPIRED) {
@@ -260,13 +296,14 @@ export async function connect(id: string): Promise<void> {
           appendLog('warn', 'zk', `${profile.name} session changed`)
         } else if (state === State.AUTH_FAILED) {
           emitStatus(id, 'error', 'Auth failed')
+          finish(new Error('Auth failed'))
         }
       })
       client.on('connected', () => {
-        emitStatus(id, 'connected')
+        if (isCurrent()) emitStatus(id, 'connected')
       })
       client.on('disconnected', () => {
-        emitStatus(id, 'reconnecting')
+        if (isCurrent()) emitStatus(id, 'reconnecting')
       })
       client.connect()
     })
@@ -274,7 +311,16 @@ export async function connect(id: string): Promise<void> {
     emitStatus(id, 'connected')
     appendLog('info', 'zk', `Connected ${profile.name}`)
   } catch (err) {
-    if (tunnel) await tunnel.close().catch(() => undefined)
+    const failed = sessions.get(id)
+    if (failed?.client) {
+      try {
+        failed.client.close()
+      } catch {
+        /* ignore */
+      }
+    }
+    const openTunnel = tunnel ?? failed?.tunnel
+    if (openTunnel) await openTunnel.close().catch(() => undefined)
     sessions.delete(id)
     const message = err instanceof Error ? err.message : String(err)
     emitStatus(id, 'error', message)
@@ -300,6 +346,11 @@ export async function disconnect(id: string): Promise<void> {
   sessions.delete(id)
   emitStatus(id, 'disconnected')
   appendLog('info', 'zk', `Disconnected ${session.profile.name}`)
+}
+
+export async function disconnectAll(): Promise<void> {
+  const ids = [...sessions.keys()]
+  await Promise.all(ids.map((id) => disconnect(id)))
 }
 
 function watchChildren(session: Session, path: string): void {

@@ -28,6 +28,7 @@ function TreeItem({ path, name, depth }: { path: string; name: string; depth: nu
   const loadChildren = useCallback(async () => {
     if (!activeId) return
     const kids = await window.yizoo.zk.listChildren(activeId, path)
+    if (useAppStore.getState().activeId !== activeId) return
     setChildren(
       path,
       kids.map((k) => k.name),
@@ -50,6 +51,8 @@ function TreeItem({ path, name, depth }: { path: string; name: string; depth: nu
     setEditorLang('plaintext')
     try {
       const data = await window.yizoo.zk.getData(activeId, path)
+      const latest = useAppStore.getState()
+      if (latest.activeId !== activeId || latest.selectedPath !== path) return
       const text = typeof data?.data === 'string' ? data.data : ''
       setNodeData(data)
       setEditorDraft(text)
@@ -57,6 +60,7 @@ function TreeItem({ path, name, depth }: { path: string; name: string; depth: nu
       setEditorLang('plaintext')
       setError(null)
     } catch (err) {
+      if (useAppStore.getState().activeId !== activeId) return
       setError(err instanceof Error ? err.message : String(err))
     }
   }
@@ -129,6 +133,7 @@ export function NodeTree() {
         setExpanded('/', true)
         try {
           const data = await window.yizoo.zk.getData(activeId, path)
+          if (useAppStore.getState().activeId !== activeId) return
           const text = typeof data?.data === 'string' ? data.data : ''
           setNodeData(data)
           setEditorDraft(text)
@@ -136,12 +141,14 @@ export function NodeTree() {
           setEditorLang('plaintext')
           const parent = path === '/' ? '/' : path.slice(0, path.lastIndexOf('/')) || '/'
           const kids = await window.yizoo.zk.listChildren(activeId, parent === '' ? '/' : parent)
+          if (useAppStore.getState().activeId !== activeId) return
           setChildren(
             parent === '' ? '/' : parent,
             kids.map((k) => k.name),
           )
           setError(null)
         } catch (err) {
+          if (useAppStore.getState().activeId !== activeId) return
           setError(err instanceof Error ? err.message : String(err))
         }
       })()

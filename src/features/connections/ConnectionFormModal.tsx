@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ConnectionProfile } from '@shared/types'
 import { useAppStore } from '../../store/app-store'
+import { askConfirm } from '../../components/confirm-store'
 
 type Props = {
   initial: ConnectionProfile | null
@@ -80,8 +81,22 @@ export function ConnectionFormModal({ initial, onClose }: Props) {
 
   async function handleDelete() {
     if (!initial) return
+    const ok = await askConfirm({
+      title: t('brand'),
+      message: t('confirmDeleteConnection', { name: initial.name }),
+      confirmLabel: t('ok'),
+      cancelLabel: t('cancel'),
+      danger: true,
+    })
+    if (!ok) return
     await window.yizoo.connections.remove(initial.id)
     setProfiles(await window.yizoo.connections.list())
+    const state = useAppStore.getState()
+    if (state.activeId === initial.id) {
+      state.setActiveId(null)
+      state.setNodeData(null)
+      state.setEditorDraft('')
+    }
     onClose()
   }
 

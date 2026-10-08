@@ -294,17 +294,22 @@ export function DataEditor() {
 
   async function saveData() {
     if (!activeId || !nodeData) return
+    const id = activeId
+    const path = selectedPath
     try {
       const stat = await window.yizoo.zk.setData(
-        activeId,
-        selectedPath,
+        id,
+        path,
         canonical,
         nodeData.stat.version,
       )
+      const latest = useAppStore.getState()
+      if (latest.activeId !== id || latest.selectedPath !== path) return
       setNodeData({ ...nodeData, data: canonical, stat })
       setEditorDirty(false)
       setError(null)
     } catch (err) {
+      if (useAppStore.getState().activeId !== id) return
       const msg = err instanceof Error ? err.message : String(err)
       setError(msg.includes('BadVersion') ? t('versionConflict') : msg)
     }
@@ -312,8 +317,12 @@ export function DataEditor() {
 
   async function refresh() {
     if (!activeId) return
+    const id = activeId
+    const path = selectedPath
     try {
-      const data = await window.yizoo.zk.getData(activeId, selectedPath)
+      const data = await window.yizoo.zk.getData(id, path)
+      const latest = useAppStore.getState()
+      if (latest.activeId !== id || latest.selectedPath !== path) return
       const text = typeof data?.data === 'string' ? data.data : ''
       setNodeData(data)
       setEditorDraft(text)
@@ -324,12 +333,15 @@ export function DataEditor() {
       setAclDraft(data.acls ?? [])
       setError(null)
     } catch (err) {
+      if (useAppStore.getState().activeId !== id) return
       setError(err instanceof Error ? err.message : String(err))
     }
   }
 
   async function remove(recursive: boolean) {
     if (!activeId) return
+    const id = activeId
+    const path = selectedPath
     const ok = await askConfirm({
       title: t('brand'),
       message: t('confirmDelete'),
@@ -338,10 +350,12 @@ export function DataEditor() {
       danger: true,
     })
     if (!ok) return
-    await window.yizoo.zk.remove(activeId, selectedPath, recursive)
-    const parent =
-      selectedPath === '/' ? '/' : selectedPath.slice(0, selectedPath.lastIndexOf('/')) || '/'
-    const kids = await window.yizoo.zk.listChildren(activeId, parent)
+    if (useAppStore.getState().activeId !== id) return
+    await window.yizoo.zk.remove(id, path, recursive)
+    if (useAppStore.getState().activeId !== id) return
+    const parent = path === '/' ? '/' : path.slice(0, path.lastIndexOf('/')) || '/'
+    const kids = await window.yizoo.zk.listChildren(id, parent)
+    if (useAppStore.getState().activeId !== id) return
     setChildren(
       parent,
       kids.map((k) => k.name),
@@ -351,17 +365,20 @@ export function DataEditor() {
 
   async function create() {
     if (!activeId || !newPath) return
+    const id = activeId
     const full = newPath.startsWith('/')
       ? newPath
       : selectedPath === '/'
         ? `/${newPath}`
         : `${selectedPath}/${newPath}`
-    await window.yizoo.zk.create(activeId, full, newData, ephemeral, sequential)
+    await window.yizoo.zk.create(id, full, newData, ephemeral, sequential)
+    if (useAppStore.getState().activeId !== id) return
     setCreateOpen(false)
     setNewPath('')
     setNewData('')
     const parent = full.slice(0, full.lastIndexOf('/')) || '/'
-    const kids = await window.yizoo.zk.listChildren(activeId, parent)
+    const kids = await window.yizoo.zk.listChildren(id, parent)
+    if (useAppStore.getState().activeId !== id) return
     setChildren(
       parent,
       kids.map((k) => k.name),
@@ -371,8 +388,12 @@ export function DataEditor() {
 
   async function saveAcl() {
     if (!activeId || !nodeData) return
+    const id = activeId
+    const path = selectedPath
     const acls = aclDraft.length ? aclDraft : nodeData.acls
-    const stat = await window.yizoo.zk.setAcl(activeId, selectedPath, acls, nodeData.stat.aversion)
+    const stat = await window.yizoo.zk.setAcl(id, path, acls, nodeData.stat.aversion)
+    const latest = useAppStore.getState()
+    if (latest.activeId !== id || latest.selectedPath !== path) return
     setNodeData({ ...nodeData, acls, stat })
   }
 
