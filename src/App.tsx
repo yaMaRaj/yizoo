@@ -227,11 +227,6 @@ export function App() {
       />
 
       <div className="workspace">
-        {loading && (
-          <div className="workspace-loading" role="status">
-            {t('loadingConnection')}
-          </div>
-        )}
         {inWorkspace ? (
           <>
             <TopBar
@@ -256,6 +251,11 @@ export function App() {
             }}
             onConnect={(p) => void handleConnect(p)}
           />
+        )}
+        {loading && (
+          <div className="workspace-loading" role="status">
+            {t('loadingConnection')}
+          </div>
         )}
       </div>
 
