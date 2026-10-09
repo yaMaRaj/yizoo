@@ -1,7 +1,10 @@
 node_modules
+frontend/node_modules
+frontend/dist
 dist
 dist-electron
 release
+build/bin
 *.log
 .DS_Store
 Thumbs.db
@@ -9,3 +12,5 @@ Thumbs.db
 .env
 .vscode
 .idea
+*.exe
+*.syso
