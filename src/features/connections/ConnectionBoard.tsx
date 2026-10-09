@@ -3,6 +3,8 @@ import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../../store/app-store'
 import type { ConnectionProfile, ConnectionStatus } from '@shared/types'
 import { askConfirm } from '../../components/confirm-store'
+import { nextCopyName } from './copy-name'
+import { RenameConnectionModal } from './RenameConnectionModal'
 
 type Props = {
   onEdit: (profile: ConnectionProfile) => void
@@ -24,7 +26,9 @@ export function ConnectionBoard({ onEdit, onConnect }: Props) {
   const setNodeData = useAppStore((s) => s.setNodeData)
   const setEditorDraft = useAppStore((s) => s.setEditorDraft)
   const setProfiles = useAppStore((s) => s.setProfiles)
+  const setError = useAppStore((s) => s.setError)
   const [menu, setMenu] = useState<MenuState>(null)
+  const [renameTarget, setRenameTarget] = useState<ConnectionProfile | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -74,6 +78,35 @@ export function ConnectionBoard({ onEdit, onConnect }: Props) {
       setEditorDraft('')
     }
     setMenu(null)
+  }
+
+  async function handleDuplicate(profile: ConnectionProfile) {
+    setMenu(null)
+    setError(null)
+    try {
+      const list = await window.yizoo.connections.list()
+      const source = list.find((p) => p.id === profile.id)
+      if (!source) {
+        setError(t('connectionNotFound'))
+        return
+      }
+      const name = nextCopyName(
+        source.name,
+        list.map((p) => p.name),
+      )
+      const now = Date.now()
+      const copy: ConnectionProfile = {
+        ...structuredClone(source),
+        id: crypto.randomUUID(),
+        name,
+        createdAt: now,
+        updatedAt: now,
+      }
+      await window.yizoo.connections.save(copy)
+      setProfiles(await window.yizoo.connections.list())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   function statusLabel(status: ConnectionStatus): string {
@@ -170,6 +203,25 @@ export function ConnectionBoard({ onEdit, onConnect }: Props) {
           <button
             type="button"
             role="menuitem"
+            onClick={() => {
+              setMenu(null)
+              setRenameTarget(menu.profile)
+            }}
+          >
+            <span className="ctx-ico">Aa</span>
+            {t('renameConnection')}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => void handleDuplicate(menu.profile)}
+          >
+            <span className="ctx-ico">⧉</span>
+            {t('duplicateConnection')}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
             className="danger"
             onClick={() => void handleDelete(menu.profile)}
           >
@@ -177,6 +229,10 @@ export function ConnectionBoard({ onEdit, onConnect }: Props) {
             {t('delete')}
           </button>
         </div>
+      )}
+
+      {renameTarget && (
+        <RenameConnectionModal profile={renameTarget} onClose={() => setRenameTarget(null)} />
       )}
     </div>
   )
